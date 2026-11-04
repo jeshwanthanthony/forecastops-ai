@@ -1,0 +1,9 @@
+{
+  "name": "forecastops-frontend",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "scripts": { "dev": "vite", "build": "vite build" },
+  "dependencies": { "@vitejs/plugin-react": "latest", "vite": "latest", "react": "latest", "react-dom": "latest", "tailwindcss": "latest", "@tailwindcss/vite": "latest", "@fontsource-variable/inter": "latest", "@fontsource-variable/inter-tight": "latest" },
+  "devDependencies": {}
+}

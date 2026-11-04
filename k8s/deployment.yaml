@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forecastops-ai
+  labels:
+    app: forecastops-ai
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: forecastops-ai
+  template:
+    metadata:
+      labels:
+        app: forecastops-ai
+    spec:
+      containers:
+        - name: dashboard
+          image: forecastops-ai:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 768Mi
+      terminationGracePeriodSeconds: 20

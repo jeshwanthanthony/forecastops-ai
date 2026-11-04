@@ -1,0 +1,23 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.streamlit/secrets.toml
+.env
+.env.*
+!.env.example
+*.py[cod]
+*.egg-info/
+coverage.xml
+.coverage
+forecastops.db
+frontend/node_modules/
+frontend/dist/
+
+# Private project references
+FONTS.md
+forecastops_reference.md
+
+# Local databases and OAuth tokens
+*.db
+*.sqlite
+*.sqlite3
