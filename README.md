@@ -1,5 +1,4 @@
-Kubernetes: https://github.com/jeshwanthanthony/forecastops-ai/tree/master/k8s  
-AWS: https://github.com/jeshwanthanthony/forecastops-ai/blob/master/AWS.md
+Kubernetes: https://github.com/jeshwanthanthony/forecastops-ai/tree/master/k8s | AWS: https://github.com/jeshwanthanthony/forecastops-ai/blob/master/AWS.md
 
 # ForecastOps AI
 
