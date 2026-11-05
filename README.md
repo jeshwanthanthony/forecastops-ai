@@ -29,13 +29,32 @@ For frontend development, run `npm run dev` in `frontend` in a second terminal w
 
 The backend loads `.env` automatically. Leave `OPENAI_API_KEY` blank to use the deterministic demo response; set it to enable the existing OpenAI analyst. Never put secrets in `VITE_` variables: Vite embeds them in browser code. No frontend environment variables are required for local use.
 
-Square is sandbox-only and experimental. Set `SQUARE_SANDBOX_APP_ID`, `SQUARE_SANDBOX_APPLICATION_SECRET`, and the exact registered `SQUARE_REDIRECT_URI`; leave `SQUARE_ENVIRONMENT=sandbox`. The optional `SQUARE_SANDBOX_ACCESS_TOKEN` is a full-access personal sandbox test token, not an OAuth seller token; it is not used for seller imports. Set a long random `SESSION_SECRET` and a stable `ENCRYPTION_KEY` (URL-safe base64 encoding of 32 random bytes) to retain encrypted tokens across restarts. Generate a key with:
+Square Sandbox is available for local development. The public Square connector can use **Production OAuth**: each visitor signs in to their own Square account, grants `MERCHANT_PROFILE_READ` and `ORDERS_READ`, and ForecastOps uses that visitor's access token to read completed orders. **The Production personal access token is not used or needed**; do not copy it to EC2.
 
-```powershell
-python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
+For a Production deployment, register **exactly** `https://forecastops.jeshwanthanthony.com/api/square/callback` in your Square Developer Console under **Production → OAuth**. Configure these server-side environment variables (never in Git or the React frontend):
+
+```dotenv
+SQUARE_ENVIRONMENT=production
+SQUARE_PRODUCTION_APP_ID=
+SQUARE_PRODUCTION_APPLICATION_SECRET=
+SQUARE_REDIRECT_URI=https://forecastops.jeshwanthanthony.com/api/square/callback
+SESSION_SECRET=
+ENCRYPTION_KEY=
+COOKIE_SECURE=true
+PUBLIC_ORIGIN=https://forecastops.jeshwanthanthony.com
 ```
 
-`SQUARE_CLIENT_ID`, `SQUARE_CLIENT_SECRET`, `SQUARE_SANDBOX_APP_SECRET`, and `TOKEN_ENCRYPTION_KEY` remain supported as alternatives. Without persistent keys, sessions and stored sandbox tokens will not survive a restart. Set `COOKIE_SECURE=true` behind HTTPS. The OAuth flow and token refresh have not been verified against a live sandbox; refund handling remains incomplete. Do not use real seller data. `AWS_REGION` and `S3_BUCKET_NAME` are placeholders; S3 is not implemented.
+Use a long random `SESSION_SECRET` and a stable URL-safe base64 AES-256 `ENCRYPTION_KEY`. Generate the encryption key with `python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"`. Give the environment file restrictive permissions (0600). Restart the Docker application with the updated environment file. The public reverse proxy must route `/api/square/` to FastAPI instead of returning 404; keep `/api/config/`, `/api/docs`, and `/openapi.json` private.
+
+OAuth uses single-use state and signed secure, HTTP-only, same-site cookies. Tokens are AES-GCM-encrypted and isolated using a random connection ID for each visitor's **temporary six-hour session**, never keyed solely by the merchant ID. The disconnect action requests Square revocation and removes local credentials; if revocation fails, visitors must revoke access in their Square Dashboard. This **is not a permanent logged-in SaaS account system**. Reconnecting is required when the session expires or the server's local token storage is deleted. Don't use it for storing long-term customer data without additional identity, audit, retention, and access-control work.
+
+An import reads up to 365 days of completed orders from active locations, aggregates to daily sales, and produces a forecast if at least 28 days of observations exist. Results are estimates; refunds, third-party adjustments, and reconciliation may differ from Square's accounting reports. Accounts without completed orders receive a clear message; the sample-data demo still works.
+
+Before allowing outside merchants, verify Production OAuth end to end with multiple real authorized test sellers, including cross-browser isolation, cancellation, disconnect/revocation, token refresh, and error handling. **A passing mock test is not evidence of a live Production authorization.** Uploads and unbounded public demo requests also need rate limits and usage safeguards on a small EC2 instance. Keep the OpenAI API key unset on the public server until per-user quota controls exist.
+
+In Sandbox mode, use `SQUARE_SANDBOX_APP_ID`, `SQUARE_SANDBOX_APPLICATION_SECRET`, `SQUARE_REDIRECT_URI=http://localhost:8001/api/square/callback`, and `SQUARE_ENVIRONMENT=sandbox`. The optional personal Sandbox token is not used for seller OAuth. `SQUARE_CLIENT_ID`, `SQUARE_CLIENT_SECRET`, and `TOKEN_ENCRYPTION_KEY` remain supported aliases for legacy local setups.
+
+`AWS_REGION` and `S3_BUCKET_NAME` are placeholders; S3 is not implemented.
 
 ## Docker
 
