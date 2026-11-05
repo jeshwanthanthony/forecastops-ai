@@ -10,6 +10,7 @@ import httpx
 import pandas as pd
 
 SANDBOX_BASE_URL = "https://connect.squareupsandbox.com"
+PRODUCTION_BASE_URL = "https://connect.squareup.com"
 SQUARE_VERSION = "2026-09-16"
 READ_SCOPES = ("MERCHANT_PROFILE_READ", "ORDERS_READ")
 
@@ -21,13 +22,13 @@ class SquareError(RuntimeError):
 class SquareClient:
     """Bounded request and cursor handling. Production is deliberately unsupported."""
 
-    def __init__(self, access_token: str, *, transport: httpx.BaseTransport | None = None):
-        self.access_token, self.transport = access_token, transport
+    def __init__(self, access_token: str, *, transport: httpx.BaseTransport | None = None, base_url: str = SANDBOX_BASE_URL):
+        self.access_token, self.transport, self.base_url = access_token, transport, base_url
 
     def _request(self, method: str, path: str, **kwargs) -> dict:
         headers = {"Authorization": f"Bearer {self.access_token}", "Square-Version": SQUARE_VERSION}
         for attempt in range(4):
-            with httpx.Client(base_url=SANDBOX_BASE_URL, timeout=30, transport=self.transport) as client:
+            with httpx.Client(base_url=self.base_url, timeout=30, transport=self.transport) as client:
                 response = client.request(method, path, headers=headers, **kwargs)
             if response.status_code == 429 or response.status_code >= 500:
                 if attempt == 3:
