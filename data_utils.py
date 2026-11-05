@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
+import csv
+import io
+import re
 
 import pandas as pd
 import numpy as np
@@ -80,3 +83,71 @@ def validate_sales_data(frame: pd.DataFrame) -> tuple[pd.DataFrame, DataCleaning
 def load_sales_csv(source: str | Path | BinaryIO) -> tuple[pd.DataFrame, DataCleaningReport]:
     """Read and validate a CSV file or binary stream."""
     return validate_sales_data(pd.read_csv(source))
+
+
+DATE_NAMES = {"date", "transaction_date", "order_date", "business_date", "timestamp"}
+SALES_NAMES = {"sales", "revenue", "total", "amount", "net_sales", "gross_sales"}
+COUNT_NAMES = {"order_count", "orders", "transaction_count"}
+
+
+def read_business_csv(payload: bytes) -> tuple[pd.DataFrame, dict]:
+    if not payload:
+        raise SalesDataError("The CSV file is empty.")
+    if len(payload) > 5 * 1024 * 1024:
+        raise SalesDataError("File exceeds the 5 MB limit.")
+    try:
+        text = payload.decode("utf-8-sig")
+        encoding = "utf-8"
+    except UnicodeDecodeError:
+        text = payload.decode("cp1252")
+        encoding = "windows-1252"
+    try:
+        dialect = csv.Sniffer().sniff(text[:8192], delimiters=",;\t")
+        delimiter = dialect.delimiter
+        frame = pd.read_csv(io.StringIO(text), sep=delimiter, dtype=str, keep_default_na=False, nrows=100001)
+    except (csv.Error, pd.errors.ParserError, pd.errors.EmptyDataError) as error:
+        raise SalesDataError("Unable to read the CSV. Check its delimiter and headers.") from error
+    if frame.empty or len(frame.columns) > 100:
+        raise SalesDataError("CSV must contain data and no more than 100 columns.")
+    if len(frame) > 100000:
+        raise SalesDataError("CSV cannot contain more than 100,000 rows.")
+    def matches(names):
+        return [c for c in frame.columns if re.sub(r"[\s-]+", "_", c.strip().lower()) in names]
+    candidates = {"date": matches(DATE_NAMES), "sales": matches(SALES_NAMES), "order_count": matches(COUNT_NAMES)}
+    return frame, {"encoding": encoding, "delimiter": {",": "comma", ";": "semicolon", "\t": "tab"}[delimiter], "columns": list(frame.columns), "candidates": candidates, "preview": frame.head(5).to_dict(orient="records")}
+
+
+def normalize_business_csv(frame: pd.DataFrame, date_column: str, sales_column: str, count_column: str = "", date_order: str = ""):
+    if date_column not in frame or sales_column not in frame or date_column == sales_column:
+        raise SalesDataError("Choose distinct date and sales columns.")
+    if count_column and (count_column not in frame or count_column in (date_column, sales_column)):
+        raise SalesDataError("Choose a distinct order-count column.")
+    raw_dates = frame[date_column].str.strip()
+    ambiguous = raw_dates.str.match(r"^\d{1,2}/\d{1,2}/\d{4}(?:\s|$)")
+    if ambiguous.any() and date_order not in ("mdy", "dmy"):
+        raise SalesDataError("Ambiguous date format. Choose month/day/year or day/month/year.")
+    dates = pd.to_datetime(raw_dates, errors="coerce", format="mixed", dayfirst=date_order == "dmy", utc=True)
+    if dates.isna().any():
+        raise SalesDataError("Date column contains invalid values.")
+    amounts = frame[sales_column].str.strip().str.replace(r"[$£€\s,]", "", regex=True)
+    amounts = amounts.str.replace(r"^\((.+)\)$", r"-\1", regex=True)
+    numeric = pd.to_numeric(amounts, errors="coerce")
+    if numeric.isna().any() or not np.isfinite(numeric).all():
+        raise SalesDataError("Sales column contains invalid values.")
+    data = pd.DataFrame({"date": dates.dt.tz_localize(None).dt.normalize(), "sales": numeric})
+    if count_column:
+        counts = pd.to_numeric(frame[count_column], errors="coerce")
+        if counts.isna().any() or (counts < 0).any() or (counts % 1 != 0).any():
+            raise SalesDataError("Order counts must be nonnegative whole numbers.")
+        data["order_count"] = counts
+    grouped = data.groupby("date", as_index=False).sum(numeric_only=True)
+    if (grouped.sales < 0).any():
+        raise SalesDataError("Daily net sales cannot be negative; review refund rows.")
+    if len(grouped) < 28:
+        raise SalesDataError("At least 28 distinct daily observations are required.")
+    if (grouped.date.max() - grouped.date.min()).days > 3652:
+        raise SalesDataError("CSV date range cannot exceed ten years.")
+    full = pd.date_range(grouped.date.min(), grouped.date.max())
+    missing = len(full) - len(grouped)
+    result = grouped.set_index("date").reindex(full, fill_value=0).rename_axis("date").reset_index()
+    return result, {"input_rows": len(frame), "duplicate_rows_aggregated": len(frame) - len(grouped), "missing_days_filled": missing, "invalid_rows": 0, "sales_column": sales_column}

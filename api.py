@@ -10,6 +10,7 @@ import secrets
 import threading
 import time
 from collections import defaultdict, deque
+from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,7 +18,7 @@ from urllib.parse import urlencode, urlsplit
 
 import httpx
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.responses import JSONResponse
@@ -27,7 +28,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.concurrency import run_in_threadpool
 
 from agent import answer_sales_question
-from data_utils import SalesDataError, validate_sales_data
+from data_utils import SalesDataError, validate_sales_data, read_business_csv, normalize_business_csv
 from forecasting import chronological_backtest, fit_model, recursive_forecast, seasonal_naive_forecast
 from square import READ_SCOPES, SANDBOX_BASE_URL, PRODUCTION_BASE_URL, SquareClient, SquareError, normalize_orders
 from storage import TokenStore
@@ -74,16 +75,30 @@ async def limit_public_requests(request: Request, call_next):
     return await call_next(request)
 
 
-def demo_data(days: int = 730) -> pd.DataFrame:
+def demo_data(days: int = 730, scenario: str = "normal") -> pd.DataFrame:
     import numpy as np
     rng = np.random.default_rng(7)
     dates = pd.date_range(end=pd.Timestamp.today().normalize(), periods=days)
     weekly = np.array([.85, .8, .9, 1, 1.2, 1.35, 1.1])[dates.dayofweek]
     sales = 1800 * weekly * np.linspace(1, 1.25, days) * rng.normal(1, .07, days)
+    if scenario == "weekend":
+        sales *= np.where(dates.dayofweek >= 5, 1.4, .9)
+    elif scenario == "growth":
+        sales *= np.linspace(.7, 1.4, days)
+    elif scenario == "seasonal":
+        sales *= 1 + .22 * np.sin(2 * np.pi * dates.dayofyear.to_numpy() / 365.25)
+    elif scenario == "change":
+        sales *= np.where(np.arange(days) >= days - 45, 1.3, 1.0)
     return pd.DataFrame({"date": dates, "sales": sales.round(2), "order_count": (sales / rng.normal(19, 1.2, days)).round().astype(int)})
 
 
 def dashboard(data: pd.DataFrame, report: dict | None = None) -> dict:
+    report = dict(report or {})
+    report["model"] = "seasonal naive" if len(data) < 60 else "Ridge regression"
+    horizon = min(28, max(7, len(data) // 4))
+    report["training_end"] = str(pd.Timestamp(data.date.iloc[-horizon - 1]).date())
+    report["evaluation_start"] = str(pd.Timestamp(data.date.iloc[-horizon]).date())
+    report["evaluation_end"] = str(pd.Timestamp(data.date.iloc[-1]).date())
     started = time.monotonic()
     model = fit_model(data)
     logging.getLogger("forecastops.performance").info("model_fit_seconds=%.3f", time.monotonic() - started)
@@ -100,11 +115,35 @@ def dashboard(data: pd.DataFrame, report: dict | None = None) -> dict:
 @app.get("/api/health")
 def health(): return {"status": "ok"}
 
+@lru_cache(maxsize=5)
+def cached_demo(scenario: str):
+    return dashboard(demo_data(scenario=scenario), {"source": "Synthetic demonstration", "scenario": scenario})
+
 @app.get("/api/demo")
-def get_demo(): return dashboard(demo_data())
+def get_demo(scenario: str = "normal"):
+    if scenario not in {"normal", "weekend", "growth", "seasonal", "change"}:
+        raise HTTPException(400, "Unknown demo scenario.")
+    return cached_demo(scenario)
 
 @app.get("/api/sample.csv")
 def sample_csv(): return FileResponse(ROOT / "data" / "sample_sales.csv", media_type="text/csv", filename="forecastops-sample.csv")
+
+@app.post("/api/csv/preview")
+async def preview_csv(file: UploadFile = File(...)):
+    try:
+        _, info = read_business_csv(await file.read(5 * 1024 * 1024 + 1))
+        return info
+    except (SalesDataError, UnicodeError) as error:
+        raise HTTPException(422, str(error)) from error
+
+@app.post("/api/csv/import")
+async def import_csv(file: UploadFile = File(...), date_column: str = Form(...), sales_column: str = Form(...), count_column: str = Form(""), date_order: str = Form("")):
+    try:
+        frame, _ = read_business_csv(await file.read(5 * 1024 * 1024 + 1))
+        data, report = normalize_business_csv(frame, date_column, sales_column, count_column, date_order)
+        return await run_in_threadpool(dashboard, data, {"source": "Uploaded CSV", **report})
+    except (SalesDataError, UnicodeError) as error:
+        raise HTTPException(422, str(error)) from error
 
 @app.post("/api/upload")
 async def upload_csv(file: UploadFile = File(...)):

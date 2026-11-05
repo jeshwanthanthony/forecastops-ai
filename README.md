@@ -1,25 +1,25 @@
 # ForecastOps AI
 
-**AI sales forecasting | Python · FastAPI · React · Docker · Kubernetes (kind) · AWS EC2 · ECR · S3 · GitHub Actions**
+ForecastOps turns daily sales data into a seven-day forecast and compares it with a seasonal-naive baseline. Data can come from a CSV, a temporary Square connection, or a synthetic restaurant demo.
 
-**[Live HTTPS demo](https://forecastops.jeshwanthanthony.com)** · **[Deployment evidence](docs/DEPLOYMENT_EVIDENCE.md)** · **[Kubernetes manifests and instructions](k8s/README.md)**
+[Live application](https://forecastops.jeshwanthanthony.com) · [Backend](api.py) · [Forecasting](forecasting.py) · [Square](square.py) · [AWS](AWS.md) · [Deployment evidence](docs/DEPLOYMENT_EVIDENCE.md) · [Kubernetes manifest](k8s/deployment.yaml) · [Kubernetes smoke workflow](.github/workflows/kubernetes-smoke.yml) · [Python tests](.github/workflows/tests.yml)
 
-A containerized sales-forecasting portfolio project with a public AWS EC2 deployment and a separate, reproducible local Kubernetes kind deployment. The public EC2 server runs Docker, **not EKS or K3s**. Square Production OAuth is under development separately; the current main-branch Square integration is for Sandbox testing.
+[![Python tests](https://github.com/jeshwanthanthony/forecastops-ai/actions/workflows/tests.yml/badge.svg?branch=feature%2Fsquare-oauth-codex)](https://github.com/jeshwanthanthony/forecastops-ai/actions/workflows/tests.yml) [![Kubernetes smoke](https://github.com/jeshwanthanthony/forecastops-ai/actions/workflows/kubernetes-smoke.yml/badge.svg?branch=feature%2Fsquare-oauth-codex)](https://github.com/jeshwanthanthony/forecastops-ai/actions/workflows/kubernetes-smoke.yml)
 
+## How it works
 
-ForecastOps AI explores daily sales history, a seven-day forecast, and model accuracy. Try the synthetic demo or upload a CSV with `date`, `sales`, and optional `order_count`. At least 28 distinct dates are required.
+React presents the data; FastAPI validates it and serves the built frontend. Pandas aggregates daily sales, and a lightweight model forecasts the next week. Square imports run in a bounded background worker using the visitor's OAuth token. SQLite stores encrypted, temporary connection credentials.
 
-React and Vite provide the interface. FastAPI serves the built frontend and calls the Python forecasting and analyst modules. A seasonal-naive forecast is used for short histories; longer histories use regularized Ridge regression. Both are compared with a seasonal-naive baseline using a chronological holdout.
+The forecast uses a seasonal-naive model for shorter histories and Ridge regression for longer histories. Evaluation holds out the latest observations in chronological order. MAE is the average absolute difference between the forecast and actual sales; it is not a guarantee of future accuracy.
 
-## Local setup
+## Run locally
 
-Install Python 3.12 and Node.js 22 or later. In PowerShell:
+Install Python 3.12 and Node.js 22 or later, then run in PowerShell:
 
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-Copy-Item .env.example .env
 cd frontend
 npm install
 npm run build
@@ -28,78 +28,24 @@ python -m pytest
 python -m uvicorn api:app --reload --port 8001
 ```
 
-Open `http://localhost:8001`. The health endpoint is `/api/health`; API documentation is at `/api/docs`.
+Open http://localhost:8001. For frontend development, run `npm run dev` in `frontend` while the backend is running. Copy `.env.example` to `.env` only if you need an optional integration; keep `.env` private.
 
-For frontend development, run `npm run dev` in `frontend` in a second terminal while the backend is running. Vite prints its local URL and proxies `/api` requests to port 8001.
+## Data and integrations
 
-## Configuration
+CSV uploads preview their columns and suggest common date and sales names; choose a mapping and explicitly select month/day or day/month for ambiguous slash dates. UTF-8, UTF-8 BOM, Windows-1252, comma, semicolon, and tab files are supported. Duplicate transaction dates are summed, missing dates are zero-filled, and malformed rows are rejected. At least 28 distinct dates are required; limits are 5 MB and 100,000 rows. Timestamps are grouped by UTC date. The selected sales column is used as supplied: gross and net sales are not converted into each other.
 
-The backend loads `.env` automatically. Leave `OPENAI_API_KEY` blank to use the deterministic demo response; set it to enable the existing OpenAI analyst. Never put secrets in `VITE_` variables: Vite embeds them in browser code. No frontend environment variables are required for local use.
+Square requests read-only merchant and order permissions; visitor connections are temporary browser sessions, not accounts. The optional OpenAI analyst uses function calls against the loaded data; without a key the demo uses a labeled deterministic response.
 
-Square Sandbox is available for local development. The public Square connector can use **Production OAuth**: each visitor signs in to their own Square account, grants `MERCHANT_PROFILE_READ` and `ORDERS_READ`, and ForecastOps uses that visitor's access token to read completed orders. **The Production personal access token is not used or needed**; do not copy it to EC2.
+Imported Square sales are estimates and are not reconciled accounting reports. Refunds, taxes, tips, multiple currencies, and incomplete imports can affect the results. A forecast cannot predict unexpected events.
 
-For a Production deployment, register **exactly** `https://forecastops.jeshwanthanthony.com/api/square/callback` in your Square Developer Console under **Production → OAuth**. Configure these server-side environment variables (never in Git or the React frontend):
+## Infrastructure and tests
 
-```dotenv
-SQUARE_ENVIRONMENT=production
-SQUARE_PRODUCTION_APP_ID=
-SQUARE_PRODUCTION_APPLICATION_SECRET=
-SQUARE_REDIRECT_URI=https://forecastops.jeshwanthanthony.com/api/square/callback
-SESSION_SECRET=
-ENCRYPTION_KEY=
-COOKIE_SECURE=true
-PUBLIC_ORIGIN=https://forecastops.jeshwanthanthony.com
-```
-
-Use a long random `SESSION_SECRET` and a stable URL-safe base64 AES-256 `ENCRYPTION_KEY`. Generate the encryption key with `python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"`. Give the environment file restrictive permissions (0600). Restart the Docker application with the updated environment file. The public reverse proxy must route `/api/square/` to FastAPI instead of returning 404; keep `/api/config/`, `/api/docs`, and `/openapi.json` private.
-
-OAuth uses single-use state and signed secure, HTTP-only, same-site cookies. Tokens are AES-GCM-encrypted and isolated using a random connection ID for each visitor's **temporary six-hour session**, never keyed solely by the merchant ID. The disconnect action requests Square revocation and removes local credentials; if revocation fails, visitors must revoke access in their Square Dashboard. This **is not a permanent logged-in SaaS account system**. Reconnecting is required when the session expires or the server's local token storage is deleted. Don't use it for storing long-term customer data without additional identity, audit, retention, and access-control work.
-
-An import reads up to 365 days of completed orders from active locations, aggregates to daily sales, and produces a forecast if at least 28 days of observations exist. Results are estimates; refunds, third-party adjustments, and reconciliation may differ from Square's accounting reports. Accounts without completed orders receive a clear message; the sample-data demo still works.
-
-Before allowing outside merchants, verify Production OAuth end to end with multiple real authorized test sellers, including cross-browser isolation, cancellation, disconnect/revocation, token refresh, and error handling. **A passing mock test is not evidence of a live Production authorization.** The in-memory request limiter is a single-process guard; configure trusted proxy addresses and independent edge limits. Uploads are limited to 5 MB. Public OpenAI calls are disabled by default in production; keep them disabled until per-user quota controls exist. Session expiry removes local credentials but does not revoke the seller's Square authorization; sellers must disconnect in Square to revoke it. See [EC2-REVIEW.md](EC2-REVIEW.md) before deployment.
-
-In Sandbox mode, use `SQUARE_SANDBOX_APP_ID`, `SQUARE_SANDBOX_APPLICATION_SECRET`, `SQUARE_REDIRECT_URI=http://localhost:8001/api/square/callback`, and `SQUARE_ENVIRONMENT=sandbox`. The optional personal Sandbox token is not used for seller OAuth. `SQUARE_CLIENT_ID` and `SQUARE_CLIENT_SECRET` are supported as legacy Sandbox aliases only; Production requires the explicitly named Production credentials. `TOKEN_ENCRYPTION_KEY` remains an encryption-key alias.
-
-`AWS_REGION` and `S3_BUCKET_NAME` are placeholders; S3 is not implemented.
-
-## Docker
+The public deployment runs Docker on EC2 behind Nginx and HTTPS. An image was pushed to private ECR and private S3 access was tested; the application does not currently export forecasts to S3. Kubernetes is tested separately with kind, not used for the EC2 production deployment. See [AWS notes](AWS.md), [deployment evidence](docs/DEPLOYMENT_EVIDENCE.md), and [kind instructions](k8s/README.md).
 
 ```powershell
-docker build -t forecastops-ai:local .
-docker run --rm -p 8000:8000 --env-file .env forecastops-ai:local
+python -m pytest
+cd frontend
+npm run build
 ```
 
-The multistage build compiles the frontend and serves it from the FastAPI container. Omit `--env-file .env` if no optional integrations are configured.
-
-## Local Kubernetes
-
-```powershell
-kind load docker-image forecastops-ai:local --name forecastops
-kubectl apply -f k8s/deployment.yaml
-kubectl apply -f k8s/service.yaml
-kubectl rollout status deployment/forecastops-ai
-kubectl get pods -l app=forecastops-ai
-kubectl port-forward service/forecastops-ai 8000:8000
-```
-
-The deployment uses health probes. Demo scaling can be checked with `kubectl scale deployment/forecastops-ai --replicas=3`, then returned to one with `kubectl scale deployment/forecastops-ai --replicas=1`. Square token storage is local to each process and is not suitable for multiple replicas. See [Kubernetes reproduction steps](k8s/README.md) and [AWS.md](AWS.md). The Docker image was pushed to private AWS ECR as `v1`, and a private S3 test upload succeeded; S3 report storage is **not yet integrated into the application**.
-
-
-## Real infrastructure evidence
-
-| Capability | Verified project work |
-| --- | --- |
-| **AWS EC2, Docker, Nginx, HTTPS** | Public app is deployed to the EC2 Docker server behind a custom-domain TLS reverse proxy. |
-| **AWS IAM** | EC2 uses an assumed IAM role instead of embedded AWS access keys. |
-| **Amazon ECR** | Published `forecastops-ai:v1` container to private ECR in `us-east-2`. |
-| **Amazon S3** | Uploaded a private test artifact under the IAM-restricted `reports/` prefix. The application does not yet write forecast reports to S3. |
-| **Kubernetes** | `k8s/deployment.yaml` and `k8s/service.yaml` support a local kind deployment; a GitHub Actions smoke test builds the image and checks its health inside kind. |
-
-See [deployment evidence, exact resource names, and verification commands](docs/DEPLOYMENT_EVIDENCE.md). Check the GitHub [Actions](../../actions) page for **actual** CI results; a workflow file alone is not proof of a passed run.
-
-### Resume-ready project line
-
-**ForecastOps AI | Python, FastAPI, React, Docker, Kubernetes (kind), AWS EC2, ECR, S3, GitHub Actions**
-
-> Deployed a containerized AI sales-forecasting application to AWS EC2 with HTTPS, pushed versioned images to Amazon ECR, verified private S3 access with IAM, and configured repeatable Kubernetes kind deployments and CI smoke tests.
+See [GitHub Actions](https://github.com/jeshwanthanthony/forecastops-ai/actions) for actual workflow results. Production OAuth, proxy configuration, temporary-session handling, and rate limits require careful verification before making changes to the live service.
