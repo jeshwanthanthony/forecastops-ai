@@ -1,5 +1,12 @@
 # ForecastOps AI
 
+**AI sales forecasting | Python · FastAPI · React · Docker · Kubernetes (kind) · AWS EC2 · ECR · S3 · GitHub Actions**
+
+**[Live HTTPS demo](https://forecastops.jeshwanthanthony.com)** · **[Deployment evidence](docs/DEPLOYMENT_EVIDENCE.md)** · **[Kubernetes manifests and instructions](k8s/README.md)**
+
+A containerized sales-forecasting portfolio project with a public AWS EC2 deployment and a separate, reproducible local Kubernetes kind deployment. The public EC2 server runs Docker, **not EKS or K3s**. Square Production OAuth is under development separately; the current main-branch Square integration is for Sandbox testing.
+
+
 ForecastOps AI explores daily sales history, a seven-day forecast, and model accuracy. Try the synthetic demo or upload a CSV with `date`, `sales`, and optional `order_count`. At least 28 distinct dates are required.
 
 React and Vite provide the interface. FastAPI serves the built frontend and calls the existing Python forecasting and analyst modules. The random forest is compared with a seasonal-naive baseline using a chronological holdout.
@@ -76,4 +83,23 @@ kubectl get pods -l app=forecastops-ai
 kubectl port-forward service/forecastops-ai 8000:8000
 ```
 
-The deployment uses health probes. Demo scaling can be checked with `kubectl scale deployment/forecastops-ai --replicas=3`, then returned to one with `kubectl scale deployment/forecastops-ai --replicas=1`. Square token storage is local to each process and is not suitable for multiple replicas. See [AWS.md](AWS.md) for the optional ECR, EKS, and S3 plan; no AWS resources have been created.
+The deployment uses health probes. Demo scaling can be checked with `kubectl scale deployment/forecastops-ai --replicas=3`, then returned to one with `kubectl scale deployment/forecastops-ai --replicas=1`. Square token storage is local to each process and is not suitable for multiple replicas. See [Kubernetes reproduction steps](k8s/README.md) and [AWS.md](AWS.md). The Docker image was pushed to private AWS ECR as `v1`, and a private S3 test upload succeeded; S3 report storage is **not yet integrated into the application**.
+
+
+## Real infrastructure evidence
+
+| Capability | Verified project work |
+| --- | --- |
+| **AWS EC2, Docker, Nginx, HTTPS** | Public app is deployed to the EC2 Docker server behind a custom-domain TLS reverse proxy. |
+| **AWS IAM** | EC2 uses an assumed IAM role instead of embedded AWS access keys. |
+| **Amazon ECR** | Published `forecastops-ai:v1` container to private ECR in `us-east-2`. |
+| **Amazon S3** | Uploaded a private test artifact under the IAM-restricted `reports/` prefix. The application does not yet write forecast reports to S3. |
+| **Kubernetes** | `k8s/deployment.yaml` and `k8s/service.yaml` support a local kind deployment; a GitHub Actions smoke test builds the image and checks its health inside kind. |
+
+See [deployment evidence, exact resource names, and verification commands](docs/DEPLOYMENT_EVIDENCE.md). Check the GitHub [Actions](../../actions) page for **actual** CI results; a workflow file alone is not proof of a passed run.
+
+### Resume-ready project line
+
+**ForecastOps AI | Python, FastAPI, React, Docker, Kubernetes (kind), AWS EC2, ECR, S3, GitHub Actions**
+
+> Deployed a containerized AI sales-forecasting application to AWS EC2 with HTTPS, pushed versioned images to Amazon ECR, verified private S3 access with IAM, and configured repeatable Kubernetes kind deployments and CI smoke tests.

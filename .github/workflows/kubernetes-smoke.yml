@@ -1,0 +1,62 @@
+name: Kubernetes (kind) smoke test
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "Dockerfile"
+      - "requirements.txt"
+      - "api.py"
+      - "frontend/**"
+      - "forecast.py"
+      - "agent.py"
+      - "storage.py"
+      - "square.py"
+      - "k8s/**"
+      - ".github/workflows/kubernetes-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kind-deployment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build container image
+        run: docker build -t forecastops-ai:local .
+      - name: Create disposable local Kubernetes cluster
+        uses: helm/kind-action@v1.14.0
+        with:
+          cluster_name: forecastops
+      - name: Load image and deploy checked-in manifests
+        run: |
+          kind load docker-image forecastops-ai:local --name forecastops
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+      - name: Check rollout and in-cluster service health
+        run: |
+          kubectl rollout status deployment/forecastops-ai --timeout=180s
+          kubectl get pods -l app=forecastops-ai -o wide
+          kubectl get service forecastops-ai
+          kubectl port-forward service/forecastops-ai 18000:8000 > /tmp/forecastops-port-forward.log 2>&1 &
+          FORWARD_PID=$!
+          trap 'kill $FORWARD_PID 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error http://127.0.0.1:18000/api/health > /tmp/health.json 2>/dev/null; then
+              grep -q '"status":"ok"' /tmp/health.json
+              cat /tmp/health.json
+              exit 0
+            fi
+            sleep 2
+          done
+          cat /tmp/forecastops-port-forward.log
+          exit 1
+      - name: Kubernetes diagnostics if failed
+        if: failure()
+        run: |
+          kubectl get pods -A || true
+          kubectl describe deployment/forecastops-ai || true
+          kubectl logs deployment/forecastops-ai --tail=100 || true
