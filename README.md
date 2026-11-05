@@ -1,4 +1,4 @@
-Kubernetes: [![Kubernetes smoke test](https://github.com/jeshwanthanthony/forecastops-ai/actions/workflows/kubernetes-smoke.yml/badge.svg?branch=master)](https://github.com/jeshwanthanthony/forecastops-ai/actions/runs/41956496746) | AWS: https://github.com/jeshwanthanthony/forecastops-ai/blob/master/AWS.md
+Kubernetes: [![Kubernetes smoke test](https://github.com/jeshwanthanthony/forecastops-ai/actions/workflows/kubernetes-smoke.yml/badge.svg?branch=master)](https://github.com/jeshwanthanthony/forecastops-ai/actions/runs/41956496746) | AWS: [![AWS site status](https://img.shields.io/website?url=https%3A%2F%2Fforecastops.jeshwanthanthony.com%2Fapi%2Fhealth&label=AWS%20EC2&up_message=live&down_message=offline)](https://forecastops.jeshwanthanthony.com)
 
 # Forecast
 
