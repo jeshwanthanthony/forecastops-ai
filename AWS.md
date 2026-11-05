@@ -1,74 +1,59 @@
-# AWS deployment: current architecture and verification
+# AWS notes
 
-This project has a **running Docker-on-EC2 deployment**. It also has a separate local Kubernetes kind deployment; **EKS and K3s are not running in AWS**.
+The public site runs on a small EC2 instance in Ohio. Nginx handles HTTPS, then passes requests to a FastAPI app in Docker. The Kubernetes files in this repository are for a separate kind setup, not the live server.
 
-## Architecture
+## Server
 
-```text
-Browser -> forecastops.jeshwanthanthony.com (HTTPS)
-        -> AWS EC2 (us-east-2, t3.micro, Amazon Linux 2023)
-        -> Nginx :443 -> Docker container 127.0.0.1:8000
-        -> FastAPI serves React app + prediction API
+- EC2: Amazon Linux 2023, \`t3.micro\`, \`us-east-2\`
+- Instance: \`i-00b40ccf59a49fe38\`
+- Website: https://forecastops.jeshwanthanthony.com
+- IAM role: \`ForecastOps-EC2-ECR-Role\`
 
-EC2 IAM instance role
-        -> AWS ECR (Docker image v1 pushed)
-        -> AWS S3 (restricted reports/ prefix; test upload verified)
+As of November 5, 2026, the live release is \`forecastops-release:ba39344\` on localhost port \`8004\`, behind Nginx. The previous \`forecastops-final-square\` container on port \`8003\` was left available for rollback. These are deployment details, not fixed ports in the app.
 
-Local PC or GitHub Actions
-        -> kind (Kubernetes in Docker)
-        -> Deployment + Service + health probes
-```
+\`\`\`text
+Browser
+  -> HTTPS / Nginx on EC2
+  -> Docker / FastAPI
+  -> React frontend and Python forecast API
+\`\`\`
 
-The ECR push and S3 write were **verified using the EC2 terminal**. The live EC2 container currently runs a locally built image; there is not yet an ECR-driven deployment pipeline. S3 integration in the application is not yet implemented. See [recorded evidence](docs/DEPLOYMENT_EVIDENCE.md).
+The instance is small, so I build the Docker image on my PC and copy it to EC2 rather than running a heavy build on the server.
 
-## Resources
+## ECR and S3
 
-| Resource | Configuration |
-| --- | --- |
-| AWS region | `us-east-2` (Ohio) |
-| EC2 instance | `i-00b40ccf59a49fe38`, Amazon Linux 2023, `t3.micro` |
-| EC2 instance role | `ForecastOps-EC2-ECR-Role`, attached instance profile |
-| Private ECR repository | `264632269822.dkr.ecr.us-east-2.amazonaws.com/forecastops-ai` |
-| ECR image | `v1` with digest `sha256:0ac4d78739fa62eba07f526ed0ddd08a68eca6ddf3d09e1926706b4526602842` |
-| Private S3 bucket | `forecastops-ai-reports-264632269822-us-east-2-an` |
-| S3 access | EC2 role scoped to `reports/`, with `ListBucket`, `GetObject`, `PutObject` |
-| Public site | [https://forecastops.jeshwanthanthony.com](https://forecastops.jeshwanthanthony.com) |
+I also tested two AWS services outside the app:
 
-S3 has public access blocked, ACLs disabled, and SSE-S3 encryption. Never upload real sellers' Square data before implementing proper tenant-specific authorization, retention rules, and secure report access.
+- **ECR:** pushed \`forecastops-ai:v1\` to a private repository in \`us-east-2\`.
+- **S3:** uploaded a test file to the private \`reports/\` prefix using the EC2 IAM role.
 
-## Read-only verification from the EC2 terminal
+The app does **not** currently pull from ECR as part of an automatic deployment, and it doesn't write forecast files to S3. The commands and original output are in [deployment notes](docs/DEPLOYMENT_EVIDENCE.md).
 
-```bash
+## Check the server
+
+These commands only inspect things:
+
+\`\`\`bash
+sudo docker ps
+sudo nginx -t
+curl -fsS https://forecastops.jeshwanthanthony.com/api/health
 aws sts get-caller-identity
 aws ecr describe-images --region us-east-2 --repository-name forecastops-ai --image-ids imageTag=v1
 aws s3api head-object --bucket forecastops-ai-reports-264632269822-us-east-2-an --key reports/test.txt
-sudo docker ps
-curl --fail --silent --show-error http://127.0.0.1:8000/api/health
-```
+\`\`\`
 
-If access to a service is denied, inspect its IAM policies rather than creating permanent AWS access keys on the server.
-
-## Rebuild and publish an updated image
-
-Only after tests pass and a deployment change is approved, from the source directory on EC2:
-
-```bash
-sudo docker build -t forecastops-ai:local .
-aws ecr get-login-password --region us-east-2 | sudo docker login --username AWS --password-stdin 264632269822.dkr.ecr.us-east-2.amazonaws.com
-sudo docker tag forecastops-ai:local 264632269822.dkr.ecr.us-east-2.amazonaws.com/forecastops-ai:VERSION
-sudo docker push 264632269822.dkr.ecr.us-east-2.amazonaws.com/forecastops-ai:VERSION
-```
-
-Replace `VERSION` with a new immutable version tag, for example the release version or commit SHA; do not overwrite historical tags. **Pushing to ECR does not update the running EC2 container.** Separately plan a deployment and rollback when ready. Never paste your Square Application Secret or personal access token into CI or the repository.
+Images are still deployed manually. Pushing to GitHub or ECR by itself doesn't replace the running container. I keep the last working container and an Nginx config backup until the new release passes public health and demo checks.
 
 ## Kubernetes
 
-`k8s/deployment.yaml` and `k8s/service.yaml` describe a local kind test environment. See [kind deployment instructions](k8s/README.md). The GitHub Actions workflow exercises the same manifests on an ephemeral runner and checks the health endpoint; see the Actions tab for success or failure.
+The manifests in [k8s](k8s/README.md) run the same application in a local kind cluster. The [GitHub Actions smoke test](https://github.com/jeshwanthanthony/forecastops-ai/actions/runs/41956496746) passed on November 5, 2026. There is no EKS cluster here.
 
-A single-node Kubernetes control plane alongside the app is not recommended on the current 1 GiB EC2 instance. The portfolio project **does not use AWS EKS** and does not require it.
+Running a Kubernetes control plane alongside the app on a \`t3.micro\` would add complexity and memory pressure without helping this project.
 
-## Cost and safety
+## Square and access
 
-AWS promotional credits are finite, and a budget alert is not a hard spending limit. The public IPv4 address, EC2 compute, EBS storage, ECR storage, and S3 usage can incur charges. Keep the image registry private and rotate secrets if exposure is suspected.
+Production Square credentials stay in a restricted environment file on EC2, not in Docker images or Git. Encrypted connection data is stored on a restricted volume. Be careful with OAuth callback logs, proxy headers, and access to the SQLite database.
 
-The Square Production OAuth deployment is separate from AWS proof. Do not allow real sellers to connect until the authorization flow, storage, access control, and logging are independently verified.
+One real Square import worked on the earlier deployed release. The newer release passed health, demo, and Square configuration checks, but that doesn't replace checking a real seller import and session isolation.
+
+EC2, its public IPv4 address, EBS, ECR, and S3 can all incur charges. AWS budget alerts aren't spending caps.
