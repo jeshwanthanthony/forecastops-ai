@@ -21,3 +21,4 @@ forecastops_reference.md
 *.db
 *.sqlite
 *.sqlite3
+.pr1-review/

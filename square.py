@@ -1,4 +1,4 @@
-"""Small server-side, sandbox-only Square OAuth and order import client."""
+"""Server-side Square order import client."""
 from __future__ import annotations
 
 import random
@@ -10,6 +10,7 @@ import httpx
 import pandas as pd
 
 SANDBOX_BASE_URL = "https://connect.squareupsandbox.com"
+PRODUCTION_BASE_URL = "https://connect.squareup.com"
 SQUARE_VERSION = "2026-09-16"
 READ_SCOPES = ("MERCHANT_PROFILE_READ", "ORDERS_READ")
 
@@ -19,16 +20,19 @@ class SquareError(RuntimeError):
 
 
 class SquareClient:
-    """Bounded request and cursor handling. Production is deliberately unsupported."""
+    """Bounded request and cursor handling for the configured environment."""
 
-    def __init__(self, access_token: str, *, transport: httpx.BaseTransport | None = None):
-        self.access_token, self.transport = access_token, transport
+    def __init__(self, access_token: str, *, transport: httpx.BaseTransport | None = None, base_url: str = SANDBOX_BASE_URL):
+        self.access_token, self.transport, self.base_url = access_token, transport, base_url
 
     def _request(self, method: str, path: str, **kwargs) -> dict:
         headers = {"Authorization": f"Bearer {self.access_token}", "Square-Version": SQUARE_VERSION}
         for attempt in range(4):
-            with httpx.Client(base_url=SANDBOX_BASE_URL, timeout=30, transport=self.transport) as client:
-                response = client.request(method, path, headers=headers, **kwargs)
+            try:
+                with httpx.Client(base_url=self.base_url, timeout=30, transport=self.transport) as client:
+                    response = client.request(method, path, headers=headers, **kwargs)
+            except httpx.HTTPError as error:
+                raise SquareError("Unable to reach Square. Please try again.") from error
             if response.status_code == 429 or response.status_code >= 500:
                 if attempt == 3:
                     break
@@ -37,7 +41,7 @@ class SquareClient:
                 time.sleep(delay)
                 continue
             if response.status_code in (401, 403):
-                raise SquareError("Square authorization expired or is missing required permissions. Reconnect the sandbox account.")
+                raise SquareError("Square authorization expired or is missing required permissions. Reconnect your account.")
             try:
                 response.raise_for_status()
             except httpx.HTTPStatusError as error:
