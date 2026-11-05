@@ -8,7 +8,7 @@ import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 import pandas as pd
@@ -22,14 +22,14 @@ from starlette.middleware.sessions import SessionMiddleware
 from agent import answer_sales_question
 from data_utils import SalesDataError, validate_sales_data
 from forecasting import chronological_backtest, fit_model, recursive_forecast, seasonal_naive_forecast
-from square import READ_SCOPES, SANDBOX_BASE_URL, SquareClient, SquareError, normalize_orders
+from square import READ_SCOPES, SANDBOX_BASE_URL, PRODUCTION_BASE_URL, SquareClient, SquareError, normalize_orders
 from storage import TokenStore
 
 ROOT = Path(__file__).parent
 load_dotenv(ROOT / ".env")
 STATIC = ROOT / "frontend" / "dist"
 app = FastAPI(title="ForecastOps AI", docs_url="/api/docs")
-app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET") or secrets.token_urlsafe(32), https_only=os.getenv("COOKIE_SECURE", "false").lower() == "true", same_site="lax")
+app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET") or secrets.token_urlsafe(32), https_only=os.getenv("COOKIE_SECURE", "false").lower() == "true", same_site="lax", max_age=21600)
 app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:8001,http://localhost:5173").split(","), allow_methods=["GET", "POST"], allow_headers=["Content-Type"], allow_credentials=True)
 tokens = TokenStore(str(ROOT / "forecastops.db"))
 
@@ -84,93 +84,223 @@ async def ask(body: dict):
         raise HTTPException(502, "The configured AI analyst could not answer right now.") from error
 
 
-def square_configured() -> bool:
-    return not square_missing() and os.getenv("SQUARE_ENVIRONMENT", "sandbox").lower() == "sandbox"
+
+def square_environment() -> str:
+    return os.getenv("SQUARE_ENVIRONMENT", "sandbox").strip().lower()
 
 
-def square_missing() -> list[str]:
-    required = {"SQUARE_SANDBOX_APP_ID": square_client_id(), "SQUARE_SANDBOX_APPLICATION_SECRET": square_client_secret(), "SQUARE_REDIRECT_URI": os.getenv("SQUARE_REDIRECT_URI"), "SESSION_SECRET": os.getenv("SESSION_SECRET"), "ENCRYPTION_KEY": os.getenv("ENCRYPTION_KEY") or os.getenv("TOKEN_ENCRYPTION_KEY")}
-    return [name for name, value in required.items() if not value]
+def square_base_url() -> str:
+    return PRODUCTION_BASE_URL if square_environment() == "production" else SANDBOX_BASE_URL
 
 
 def square_client_id() -> str | None:
-    return os.getenv("SQUARE_CLIENT_ID") or os.getenv("SQUARE_SANDBOX_APP_ID")
+    if square_environment() == "production":
+        return os.getenv("SQUARE_PRODUCTION_APP_ID") or os.getenv("SQUARE_CLIENT_ID")
+    return os.getenv("SQUARE_SANDBOX_APP_ID") or os.getenv("SQUARE_CLIENT_ID")
 
 
 def square_client_secret() -> str | None:
+    if square_environment() == "production":
+        return os.getenv("SQUARE_PRODUCTION_APPLICATION_SECRET") or os.getenv("SQUARE_CLIENT_SECRET")
     return os.getenv("SQUARE_SANDBOX_APPLICATION_SECRET") or os.getenv("SQUARE_CLIENT_SECRET") or os.getenv("SQUARE_SANDBOX_APP_SECRET")
 
 
+def square_missing() -> list[str]:
+    mode = square_environment()
+    if mode not in ("sandbox", "production"):
+        return ["SQUARE_ENVIRONMENT (sandbox or production)"]
+    required = {
+        "SQUARE_PRODUCTION_APP_ID" if mode == "production" else "SQUARE_SANDBOX_APP_ID": square_client_id(),
+        "SQUARE_PRODUCTION_APPLICATION_SECRET" if mode == "production" else "SQUARE_SANDBOX_APPLICATION_SECRET": square_client_secret(),
+        "SQUARE_REDIRECT_URI": os.getenv("SQUARE_REDIRECT_URI"),
+        "SESSION_SECRET": os.getenv("SESSION_SECRET"),
+        "ENCRYPTION_KEY": os.getenv("ENCRYPTION_KEY") or os.getenv("TOKEN_ENCRYPTION_KEY"),
+    }
+    missing = [name for name, value in required.items() if not value]
+    if mode == "production":
+        callback = urlsplit(os.getenv("SQUARE_REDIRECT_URI", ""))
+        if callback.scheme != "https" or not callback.hostname or callback.hostname in ("localhost", "127.0.0.1"):
+            missing.append("SQUARE_REDIRECT_URI (public HTTPS URL required)")
+        if os.getenv("COOKIE_SECURE", "").lower() != "true":
+            missing.append("COOKIE_SECURE=true")
+    return missing
+
+
+def square_configured() -> bool:
+    return not square_missing()
+
+
 @app.get("/api/square/status")
-def square_status(): return {"configured": square_configured(), "mode": "sandbox", "missing": square_missing(), "message": None if square_configured() else "Square sandbox is not configured. Check server configuration."}
+def square_status():
+    return {
+        "configured": square_configured(),
+        "mode": square_environment(),
+        "missing": square_missing(),
+        "message": None if square_configured() else "Square is not configured on this server.",
+    }
+
 
 @app.get("/api/config/status")
 def config_status():
-    """Return missing names only, never credential values."""
+    """Report configuration *names* only, never secrets."""
     missing = square_missing()
     if not os.getenv("OPENAI_API_KEY"):
         missing.append("OPENAI_API_KEY")
-    if not os.getenv("SQUARE_SANDBOX_ACCESS_TOKEN"):
-        missing.append("SQUARE_SANDBOX_ACCESS_TOKEN")
-    return {"missing": missing, "square_environment_supported": os.getenv("SQUARE_ENVIRONMENT", "sandbox").lower() == "sandbox"}
+    return {"missing": missing, "square_environment_supported": square_environment() in ("sandbox", "production")}
+
 
 @app.get("/api/square/connect")
 def square_connect(request: Request):
-    if not square_configured(): raise HTTPException(503, "Square sandbox credentials are not configured.")
+    if not square_configured():
+        raise HTTPException(503, "Square OAuth is not configured on this server.")
     state = secrets.token_urlsafe(32)
     state_hash = hashlib.sha256(state.encode()).hexdigest()
     request.session["square_state"] = state_hash
     tokens.issue_state(state_hash)
-   
-    query = urlencode({"client_id": square_client_id(), "scope": " ".join(READ_SCOPES), "state": state})
+    query = {
+        "client_id": square_client_id(),
+        "scope": " ".join(READ_SCOPES),
+        "state": state,
+    }
+    # Square recommends forcing a seller sign-in for production authorizations.
+    if square_environment() == "production":
+        query["session"] = "false"
+    return RedirectResponse(f"{square_base_url()}/oauth2/authorize?{urlencode(query)}")
 
-
-
-
-
-
-
-    return RedirectResponse(f"{SANDBOX_BASE_URL}/oauth2/authorize?{query}")
 
 @app.get("/api/square/callback")
-def square_callback(request: Request, state: str, code: str = "", error: str = ""):
+def square_callback(request: Request, state: str = "", code: str = "", error: str = ""):
     state_hash = hashlib.sha256(state.encode()).hexdigest()
     saved = request.session.pop("square_state", "")
-    if not saved or not secrets.compare_digest(saved, state_hash) or not tokens.consume_state(state_hash): raise HTTPException(400, "Invalid or already-used Square OAuth state.")
-    if error or not code: raise HTTPException(400, "Square authorization was declined or did not return a code.")
-    response = httpx.post(f"{SANDBOX_BASE_URL}/oauth2/token", json={"client_id": square_client_id(), "client_secret": square_client_secret(), "code": code, "grant_type": "authorization_code", "redirect_uri": os.environ["SQUARE_REDIRECT_URI"]}, timeout=30)
-    if response.is_error: raise HTTPException(502, "Square token exchange failed.")
-    token = response.json(); merchant_id = token.get("merchant_id")
-    if not merchant_id or not token.get("access_token") or not token.get("refresh_token"): raise HTTPException(502, "Square returned an incomplete token response.")
-    status = httpx.post(f"{SANDBOX_BASE_URL}/oauth2/token/status", headers={"Authorization": f"Bearer {token['access_token']}"}, timeout=30)
-    if status.is_error or not set(READ_SCOPES).issubset(status.json().get("scopes", [])): raise HTTPException(403, "Square did not grant the required read permissions.")
-    tokens.save(merchant_id, json.dumps(token))
-    request.session["square_merchant_id"] = merchant_id
-    return RedirectResponse("/?square=connected")
+    if not state or not saved or not secrets.compare_digest(saved, state_hash) or not tokens.consume_state(state_hash):
+        raise HTTPException(400, "Invalid or already-used Square OAuth state.")
+    if error or not code:
+        raise HTTPException(400, "Square authorization was declined or did not return a code.")
+    if not square_configured():
+        raise HTTPException(503, "Square OAuth configuration is incomplete.")
+    response = httpx.post(
+        f"{square_base_url()}/oauth2/token",
+        json={
+            "client_id": square_client_id(), "client_secret": square_client_secret(),
+            "code": code, "grant_type": "authorization_code",
+            "redirect_uri": os.environ["SQUARE_REDIRECT_URI"],
+        },
+        timeout=30,
+    )
+    if response.is_error:
+        raise HTTPException(502, "Square token exchange failed.")
+    token = response.json()
+    if not token.get("merchant_id") or not token.get("access_token") or not token.get("refresh_token"):
+        raise HTTPException(502, "Square returned an incomplete token response.")
+    status = httpx.post(
+        f"{square_base_url()}/oauth2/token/status",
+        headers={"Authorization": f"Bearer {token['access_token']}"},
+        timeout=30,
+    )
+    if status.is_error or not set(READ_SCOPES).issubset(status.json().get("scopes", [])):
+        raise HTTPException(403, "Square did not grant the required read permissions.")
+    # Unpredictable per-visitor connection key. Do not key tokens by merchant ID.
+    old_connection = request.session.get("square_connection_id")
+    if old_connection:
+        tokens.delete_connection(old_connection)
+    connection_id = secrets.token_urlsafe(32)
+    tokens.save_connection(connection_id, json.dumps(token))
+    request.session["square_connection_id"] = connection_id
+    return RedirectResponse("/?square=connected", status_code=303, headers={"Cache-Control": "no-store"})
+
 
 @app.get("/api/square/import")
-def square_import(request: Request, days: int = 365):
-    merchant_id = request.session.get("square_merchant_id")
-    if not square_configured(): raise HTTPException(503, "Square sandbox configuration is incomplete.")
-    stored = tokens.get(merchant_id) if merchant_id else None
-    if not stored: raise HTTPException(401, "Connect a Square sandbox account first.")
+def square_import(request: Request, days: int = 180):
+    if not square_configured():
+        raise HTTPException(503, "Square OAuth configuration is incomplete.")
+    connection_id = request.session.get("square_connection_id")
+    stored = tokens.get_connection(connection_id) if connection_id else None
+    if not stored:
+        raise HTTPException(401, "Connect your Square account first. This temporary session may have expired.")
+    token = json.loads(stored)
+    expiry = datetime.fromisoformat(token.get("expires_at", "1970-01-01T00:00:00Z").replace("Z", "+00:00"))
+    if expiry <= datetime.now(timezone.utc) + timedelta(days=7):
+        refreshed = httpx.post(
+            f"{square_base_url()}/oauth2/token",
+            json={
+                "client_id": square_client_id(),
+                "client_secret": square_client_secret(),
+                "grant_type": "refresh_token",
+                "refresh_token": token["refresh_token"],
+            },
+            timeout=30,
+        )
+        if refreshed.is_error:
+            raise HTTPException(401, "Square authorization expired. Connect your account again.")
+        token.update(refreshed.json())
+        tokens.save_connection(connection_id, json.dumps(token))
     try:
-        token = json.loads(stored)
-        expiry = datetime.fromisoformat(token.get("expires_at", "1970-01-01T00:00:00Z").replace("Z", "+00:00"))
-        if expiry <= datetime.now(timezone.utc) + timedelta(days=7):
-            refreshed = httpx.post(f"{SANDBOX_BASE_URL}/oauth2/token", json={"client_id": square_client_id(), "client_secret": square_client_secret(), "grant_type": "refresh_token", "refresh_token": token["refresh_token"]}, timeout=30)
-            if refreshed.is_error: raise HTTPException(401, "Square authorization expired. Reconnect the sandbox account.")
-            token.update(refreshed.json())
-            tokens.save(merchant_id, json.dumps(token))
-        client = SquareClient(token["access_token"]); locations = client.locations()
-        if not locations: raise HTTPException(422, "No Square locations were found.")
-        location = locations[0]; end = datetime.now(timezone.utc); start = end - timedelta(days=max(21, min(days, 730)))
-        orders, complete = client.completed_orders(location["id"], start.isoformat(), end.isoformat())
-        data = normalize_orders(orders, location.get("timezone", "UTC"))
-        if len(data) < 28: raise HTTPException(422, "Square returned fewer than 28 days of completed sales; forecasting needs more history.")
-        return dashboard(data, {"source": "Square sandbox", "complete": complete, "location": location.get("name", location["id"])})
-    except SquareError as error: raise HTTPException(502, str(error)) from error
+        client = SquareClient(token["access_token"], base_url=square_base_url())
+        locations = [loc for loc in client.locations() if loc.get("status", "ACTIVE") == "ACTIVE"]
+        if not locations:
+            raise HTTPException(422, "Your Square account has no active locations.")
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=max(28, min(days, 365)))
+        daily_frames = []
+        all_complete = True
+        for location in locations:
+            orders, complete = client.completed_orders(location["id"], start.isoformat(), end.isoformat(), max_pages=50)
+            all_complete = all_complete and complete
+            if orders:
+                daily_frames.append(normalize_orders(orders, location.get("timezone") or "UTC"))
+        if not all_complete:
+            raise HTTPException(422, "Too many Square orders for one import. Try a shorter date range.")
+        if not daily_frames:
+            raise HTTPException(422, "Square returned no completed orders for your account during this period.")
+        combined = pd.concat(daily_frames, ignore_index=True)
+        combined = combined.groupby("date", as_index=False).agg({"sales": "sum", "order_count": "sum"})
+        combined = combined.set_index("date").reindex(
+            pd.date_range(combined.date.min(), combined.date.max()), fill_value=0
+        ).rename_axis("date").reset_index()
+        if len(combined) < 28:
+            raise HTTPException(422, "Square returned fewer than 28 days of completed sales; forecasting needs more history.")
+        result = dashboard(combined, {
+            "source": "Square sales (estimated, not an accounting report)",
+            "locations": len(locations),
+            "complete": all_complete,
+        })
+        return result
+    except SquareError as error:
+        raise HTTPException(502, str(error)) from error
 
+
+@app.post("/api/square/disconnect")
+def square_disconnect(request: Request):
+    origin = request.headers.get("origin")
+    if origin:
+        public_url = os.getenv("PUBLIC_ORIGIN", "https://forecastops.jeshwanthanthony.com")
+        allowed = {public_url.rstrip("/")}
+        if square_environment() == "sandbox":
+            allowed.update({"http://localhost:8001", "http://localhost:5173", "http://127.0.0.1:8001"})
+        if origin not in allowed:
+            raise HTTPException(403, "Invalid request origin.")
+    connection_id = request.session.pop("square_connection_id", None)
+    stored = tokens.get_connection(connection_id) if connection_id else None
+    if not stored:
+        return {"disconnected": True, "square_revoked": False}
+    token = json.loads(stored)
+    try:
+        response = httpx.post(
+            f"{square_base_url()}/oauth2/revoke",
+            headers={"Authorization": f"Client {square_client_secret()}"},
+            json={
+                "client_id": square_client_id(),
+                "access_token": token["access_token"],
+                "revoke_only_access_token": False,
+            },
+            timeout=20,
+        )
+    except httpx.HTTPError:
+        response = None
+    tokens.delete_connection(connection_id)
+    revoked = bool(response is not None and response.is_success and response.json().get("success"))
+    return {"disconnected": True, "square_revoked": revoked,
+            "message": None if revoked else "Local session cleared. Revoke ForecastOps in your Square Dashboard to ensure access is removed."}
 
 if STATIC.exists():
     app.mount("/assets", StaticFiles(directory=STATIC / "assets"), name="assets")
