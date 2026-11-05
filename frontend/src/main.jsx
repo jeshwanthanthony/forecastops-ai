@@ -5,6 +5,33 @@ import '@fontsource-variable/inter-tight'
 import './styles.css'
 
 const API='/api'
+let activeImport = null
+async function cancelImport() {
+  if (!activeImport) return
+  activeImport.cancelled = true
+  if (activeImport.id) await fetch(`${API}/square/import/jobs/${activeImport.id}`, {method:'DELETE', signal:AbortSignal.timeout(15000)})
+}
+async function readResponse(response) {
+  const type = response.headers.get('content-type') || ''
+  if (!type.includes('application/json')) throw new Error('The server is unavailable. Please try again.')
+  const data = await response.json()
+  if (!response.ok) throw new Error(data.detail || 'Request failed. Please try again.')
+  return data
+}
+async function importSquare() {
+  const current = {id:null,cancelled:false}; activeImport=current
+  const job = await readResponse(await fetch(`${API}/square/import/jobs`, {method:'POST', signal:AbortSignal.timeout(15000)}))
+  current.id=job.job_id
+  if(current.cancelled){await fetch(`${API}/square/import/jobs/${job.job_id}`,{method:'DELETE',signal:AbortSignal.timeout(15000)});throw new Error('Import cancelled.')}
+  for (let i=0;i<180;i++) {
+    if(current.cancelled) throw new Error('Import cancelled.')
+    await new Promise(resolve=>setTimeout(resolve,2000))
+    const status=await readResponse(await fetch(`${API}/square/import/jobs/${job.job_id}`,{cache:'no-store',signal:AbortSignal.timeout(15000)}))
+    if(status.status==='completed') return status.result
+    if(status.status==='failed'||status.status==='cancelled') throw new Error(status.error||'Import cancelled.')
+  }
+  throw new Error('Import is taking longer than expected. Please try again later.')
+}
 const money=n => new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:0}).format(n||0)
 
 function Chart({data, forecast=[]}) {
@@ -29,9 +56,7 @@ function SquareCard({onResult}) {
   const importSales=async()=>{
     setBusy(true);setError('');
     try {
-      const r=await fetch(`${API}/square/import`,{cache:'no-store'});
-      const data=await r.json();
-      if(!r.ok)throw new Error(data.detail||'Sales import failed.');
+      const data=await importSquare();
       onResult(data);
     } catch(e) {setError(e.message);} finally {setBusy(false);}
   };
@@ -48,7 +73,7 @@ function SquareCard({onResult}) {
     <div className="number">01 <b>{status?.mode==='production'?'PRODUCTION':'SANDBOX'}</b></div>
     <h2>Connect to Square</h2>
     <p>Authorize read-only access to your own completed orders and build a seven-day forecast.</p>
-    {connected?<><button className="button" disabled={busy} onClick={importSales}>{busy?'Importing…':'Import my sales'}</button><button className="quiet" disabled={busy} onClick={disconnect}>Disconnect Square</button></>
+    {connected?<><button className="button" disabled={busy} onClick={importSales}>{busy?'Importing…':'Import my sales'}</button>{busy?<button className="quiet" onClick={()=>cancelImport().catch(()=>setError('Could not cancel. Please try again.'))}>Cancel import</button>:<button className="quiet" onClick={disconnect}>Disconnect Square</button>}</>
       :<button className="button" disabled={!status?.configured} onClick={()=>location.href=`${API}/square/connect`}>{status?.configured?'Connect Square':'Configuration needed'}</button>}
     <p className="note">{status?.message||'Read-only permission. Your connection is temporary; disconnect when finished. Forecast figures are estimates.'}</p>
     {error&&<p className="error" role="alert">{error}</p>}
@@ -57,7 +82,7 @@ function SquareCard({onResult}) {
 function DemoCard({onResult}){const [busy,setBusy]=useState(false),[error,setError]=useState('');const open=async()=>{setBusy(true);setError('');try{const r=await fetch(`${API}/demo`);if(!r.ok)throw new Error();onResult(await r.json())}catch{setError('The demo could not be loaded. Please try again.')}finally{setBusy(false)}};return <article className="card enter d3"><div className="number">03</div><h2>See how it works</h2><p>Explore forecasts using fictional sales data.</p><button className="button" disabled={busy} onClick={open}>{busy?'Loading…':'Explore the demo'}</button>{error&&<p className="error" role="alert">{error}</p>}</article>}
 function Welcome({onResult}){return <main className="welcome"><header><div className="wordmark">ForecastOps <span>AI</span></div><div className="tag">SALES FORECASTING</div></header><section className="hero enter"><p className="eyebrow">GET STARTED</p><h1>A clearer view<br/><em>of what’s ahead.</em></h1><p className="lead">Bring your sales data, or explore a sample to see how it works.</p></section><section className="cards" aria-label="Choose how to get started"><SquareCard onResult={onResult}/><CsvCard onResult={onResult}/><DemoCard onResult={onResult}/></section><footer>ForecastOps AI <span>·</span> Sales forecasting and analysis</footer></main>}
 function App(){
-  const [result,setResult]=useState(null),[leaving,setLeaving]=useState(false),[squareError,setSquareError]=useState('');
+  const [result,setResult]=useState(null),[leaving,setLeaving]=useState(false),[squareError,setSquareError]=useState(''),[squareLoading,setSquareLoading]=useState(false);
   const navigate=next=>{
     if(window.matchMedia('(prefers-reduced-motion: reduce)').matches){setResult(next);return}
     setLeaving(true);
@@ -73,12 +98,15 @@ function App(){
   useEffect(()=>{
     if(new URLSearchParams(location.search).get('square')==='connected'){
       history.replaceState(null,'','/');
-      fetch(`${API}/square/import`,{cache:'no-store'})
-        .then(async r=>{const data=await r.json();if(!r.ok)throw new Error(data.detail||'Square sales import failed.');setResult(data)})
-        .catch(e=>setSquareError(e.message));
+      setSquareLoading(true);
+      importSquare()
+        .then(data=>setResult(data))
+        .catch(e=>setSquareError(e.message))
+        .finally(()=>setSquareLoading(false));
     }
   },[]);
   return <div className={leaving?'page page-leaving':'page'}>
+    {squareLoading&&<p role="status" style={{maxWidth:840,margin:'1rem auto',padding:12}}>Importing your Square sales. This may take a few minutes. <button className="quiet" onClick={()=>cancelImport().catch(()=>setSquareError('Could not cancel. Please try again.'))}>Cancel import</button></p>}
     {squareError&&<p className="error" role="alert" style={{maxWidth:840,margin:'1rem auto',padding:12}}>{squareError}</p>}
     {result?<Dashboard result={result} onBack={()=>navigate(null)} onDisconnect={disconnect}/>:<Welcome onResult={navigate}/>}
   </div>

@@ -22,14 +22,16 @@ class SquareError(RuntimeError):
 class SquareClient:
     """Bounded request and cursor handling for the configured environment."""
 
-    def __init__(self, access_token: str, *, transport: httpx.BaseTransport | None = None, base_url: str = SANDBOX_BASE_URL):
+    def __init__(self, access_token: str, *, transport: httpx.BaseTransport | None = None, base_url: str = SANDBOX_BASE_URL, check=None):
         self.access_token, self.transport, self.base_url = access_token, transport, base_url
+        self.check = check or (lambda: None)
 
     def _request(self, method: str, path: str, **kwargs) -> dict:
         headers = {"Authorization": f"Bearer {self.access_token}", "Square-Version": SQUARE_VERSION}
         for attempt in range(4):
+            self.check()
             try:
-                with httpx.Client(base_url=self.base_url, timeout=30, transport=self.transport) as client:
+                with httpx.Client(base_url=self.base_url, timeout=15, transport=self.transport) as client:
                     response = client.request(method, path, headers=headers, **kwargs)
             except httpx.HTTPError as error:
                 raise SquareError("Unable to reach Square. Please try again.") from error
@@ -37,8 +39,13 @@ class SquareClient:
                 if attempt == 3:
                     break
                 retry_after = response.headers.get("Retry-After")
-                delay = float(retry_after) if retry_after else min(8, 2**attempt + random.random())
-                time.sleep(delay)
+                try:
+                    delay = min(30, max(0, float(retry_after))) if retry_after else min(8, 2**attempt + random.random())
+                except ValueError:
+                    delay = min(8, 2**attempt + random.random())
+                for _ in range(int(delay * 10)):
+                    self.check()
+                    time.sleep(.1)
                 continue
             if response.status_code in (401, 403):
                 raise SquareError("Square authorization expired or is missing required permissions. Reconnect your account.")
@@ -52,18 +59,25 @@ class SquareClient:
     def locations(self) -> list[dict]:
         return self._request("GET", "/v2/locations").get("locations", [])
 
-    def completed_orders(self, location_id: str, start_at: str, end_at: str, max_pages: int = 200) -> tuple[list[dict], bool]:
-        orders, cursor = [], None
+    def completed_order_pages(self, location_id: str, start_at: str, end_at: str, max_pages: int = 200):
+        cursor = None
         for _ in range(max_pages):
+            self.check()
             body = {"location_ids": [location_id], "query": {"filter": {"state_filter": {"states": ["COMPLETED"]}, "date_time_filter": {"closed_at": {"start_at": start_at, "end_at": end_at}}}, "sort": {"sort_field": "CLOSED_AT", "sort_order": "ASC"}}, "limit": 500}
             if cursor:
                 body["cursor"] = cursor
             response = self._request("POST", "/v2/orders/search", json=body)
-            orders.extend(response.get("orders", []))
             cursor = response.get("cursor")
+            yield response.get("orders", []), not bool(cursor)
             if not cursor:
-                return orders, True
-        return orders, False
+                return
+
+    def completed_orders(self, location_id: str, start_at: str, end_at: str, max_pages: int = 200) -> tuple[list[dict], bool]:
+        """Compatibility helper; imports should consume pages incrementally."""
+        orders, complete = [], False
+        for page, complete in self.completed_order_pages(location_id, start_at, end_at, max_pages):
+            orders.extend(page)
+        return orders, complete
 
 
 def normalize_orders(orders: list[dict], timezone: str) -> pd.DataFrame:

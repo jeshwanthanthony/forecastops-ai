@@ -2,6 +2,8 @@
 import base64
 import os
 import json
+import time
+import threading
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlsplit
 
@@ -87,7 +89,7 @@ def test_square_client_calls_production_not_sandbox():
 def test_public_visitor_without_authorization_cannot_import(monkeypatch):
     production_config(monkeypatch)
     with TestClient(app) as client:
-        response = client.get("/api/square/import")
+        response = client.post("/api/square/import/jobs")
         assert response.status_code == 401
 
 
@@ -115,7 +117,7 @@ def test_callback_state_is_bound_to_browser_and_single_use(monkeypatch, isolated
         assert visitor_a.get("/api/square/callback", params={"code": "x", "state": state}, follow_redirects=False).status_code == 303
         assert visitor_a.get("/api/square/callback", params={"code": "x", "state": state}).status_code == 400
         assert visitor_b.get("/api/square/session").json()["connected"] is False
-        assert visitor_b.get("/api/square/import").status_code == 401
+        assert visitor_b.post("/api/square/import/jobs").status_code == 401
 
 
 def test_callback_handles_square_outage(monkeypatch, isolated_store):
@@ -132,7 +134,7 @@ def test_import_refreshes_and_handles_empty_locations(monkeypatch, isolated_stor
     isolated_store.save_connection("visitor", json.dumps(token))
     monkeypatch.setattr(api.httpx, "post", lambda *args, **kwargs: httpx.Response(200, json={"access_token": "new", "expires_at": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()}))
     monkeypatch.setattr(api.SquareClient, "locations", lambda self: [{"id": "a"}, {"id": "b"}])
-    monkeypatch.setattr(api.SquareClient, "completed_orders", lambda *args, **kwargs: ([], True))
+    monkeypatch.setattr(api.SquareClient, "completed_order_pages", lambda *args, **kwargs: iter([([], True)]))
     with TestClient(app) as client:
         from itsdangerous import TimestampSigner
         import base64 as b64
@@ -140,9 +142,9 @@ def test_import_refreshes_and_handles_empty_locations(monkeypatch, isolated_stor
         middleware = next(item for item in app.user_middleware if item.cls.__name__ == "SessionMiddleware")
         signer = TimestampSigner(middleware.kwargs["secret_key"])
         client.cookies.set("session", signer.sign(payload).decode())
-        response = client.get("/api/square/import")
-        assert response.status_code == 422
-        assert "no completed orders" in response.json()["detail"]
+        response = wait_for_job(client)
+        assert response["status"] == "failed"
+        assert "no completed orders" in response["error"]
         assert json.loads(isolated_store.get_connection("visitor"))["access_token"] == "new"
 
 
@@ -185,22 +187,66 @@ def test_multiple_locations_are_combined(monkeypatch, isolated_store):
     def orders(self, location, *args, **kwargs):
         rows = [{"id": f"{location}-{day}", "closed_at": f"2026-01-{day:02d}T12:00:00Z", "total_money": {"amount": 1000 if location == "a" else 2000}} for day in range(1, 29)]
         return rows, True
-    monkeypatch.setattr(api.SquareClient, "completed_orders", orders)
+    monkeypatch.setattr(api.SquareClient, "completed_order_pages", lambda *args, **kwargs: iter([orders(*args, **kwargs)]))
     with TestClient(app) as client:
         from itsdangerous import TimestampSigner
         middleware = next(item for item in app.user_middleware if item.cls.__name__ == "SessionMiddleware")
         payload = base64.b64encode(json.dumps({"square_connection_id": "visitor"}).encode())
         client.cookies.set("session", TimestampSigner(middleware.kwargs["secret_key"]).sign(payload).decode())
-        response = client.get("/api/square/import")
-        assert response.status_code == 200
-        assert response.json()["report"]["locations"] == 2
-        assert response.json()["data"][0]["sales"] == 30
+        response = wait_for_job(client)
+        assert response["status"] == "completed"
+        assert response["result"]["report"]["locations"] == 2
+        assert response["result"]["data"][0]["sales"] == 30
 
 
 def test_expensive_endpoints_are_rate_limited(isolated_store):
     api._rate_events.clear()
     with TestClient(app) as client:
         for _ in range(15):
-            assert client.get("/api/square/import").status_code == 401
-        assert client.get("/api/square/import").status_code == 429
+            assert client.post("/api/square/import/jobs").status_code == 401
+        assert client.post("/api/square/import/jobs").status_code == 429
     api._rate_events.clear()
+
+
+def wait_for_job(client):
+    response = client.post("/api/square/import/jobs")
+    assert response.status_code == 202
+    path = "/api/square/import/jobs/" + response.json()["job_id"]
+    for _ in range(200):
+        result = client.get(path).json()
+        if result["status"] in ("completed", "failed", "cancelled"):
+            return result
+        time.sleep(.05)
+    pytest.fail("Import did not finish")
+
+
+def test_jobs_are_private_and_duplicate_requests_reuse_active_job(monkeypatch, isolated_store):
+    entered, release = threading.Event(), threading.Event()
+    def slow_import(request, days):
+        entered.set()
+        release.wait(5)
+        return {"ok": True}
+    monkeypatch.setattr(api, "square_import", slow_import)
+    isolated_store.save_connection("owner-a", "{}")
+    isolated_store.save_connection("owner-b", "{}")
+    from itsdangerous import TimestampSigner
+    middleware = next(item for item in app.user_middleware if item.cls.__name__ == "SessionMiddleware")
+    signer = TimestampSigner(middleware.kwargs["secret_key"])
+    with TestClient(app) as first, TestClient(app) as second:
+        for client, owner in [(first, "owner-a"), (second, "owner-b")]:
+            payload = base64.b64encode(json.dumps({"square_connection_id": owner}).encode())
+            client.cookies.set("session", signer.sign(payload).decode())
+        api._rate_events.clear()
+        job = first.post("/api/square/import/jobs").json()["job_id"]
+        assert entered.wait(2)
+        assert first.post("/api/square/import/jobs").json()["job_id"] == job
+        assert second.get(f"/api/square/import/jobs/{job}").status_code == 404
+        assert second.post("/api/square/import/jobs").status_code == 429
+        assert second.get("/api/health").status_code == 200
+        release.set()
+        for _ in range(100):
+            if first.get(f"/api/square/import/jobs/{job}").json()["status"] == "completed":
+                break
+            time.sleep(.02)
+        else:
+            pytest.fail("Background job did not complete")

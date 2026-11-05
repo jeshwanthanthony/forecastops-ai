@@ -4,11 +4,13 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import os
 import secrets
 import threading
 import time
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
@@ -22,6 +24,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.concurrency import run_in_threadpool
 
 from agent import answer_sales_question
 from data_utils import SalesDataError, validate_sales_data
@@ -36,6 +39,11 @@ app = FastAPI(title="ForecastOps AI", docs_url="/api/docs")
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET") or secrets.token_urlsafe(32), https_only=os.getenv("COOKIE_SECURE", "false").lower() == "true", same_site="lax", max_age=21600)
 app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:8001,http://localhost:5173").split(","), allow_methods=["GET", "POST"], allow_headers=["Content-Type"], allow_credentials=True)
 tokens = TokenStore(os.getenv("FORECASTOPS_DB_PATH") or str(ROOT / "forecastops.db"))
+_import_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="square-import")
+_import_lock = threading.Lock()
+_import_jobs = {}
+_import_context = threading.local()
+IMPORT_MAX_SECONDS = 300
 _rate_lock = threading.Lock()
 _rate_events: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 
@@ -43,11 +51,11 @@ _rate_events: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 @app.middleware("http")
 async def limit_public_requests(request: Request, call_next):
     """Small single-process guard; proxy and network rate limits are still required."""
-    if not request.url.path.startswith("/api/"):
+    if not request.url.path.startswith("/api/") or request.url.path == "/api/health":
         return await call_next(request)
     now = time.monotonic()
     path = request.url.path
-    group = "expensive" if path in {"/api/ask", "/api/upload", "/api/demo", "/api/square/import"} else "other"
+    group = "expensive" if path in {"/api/ask", "/api/upload", "/api/demo", "/api/square/import/jobs"} and request.method != "GET" else "other"
     limit = 15 if group == "expensive" else 90
     key = ((request.client.host if request.client else "unknown"), group)
     with _rate_lock:
@@ -76,10 +84,16 @@ def demo_data(days: int = 730) -> pd.DataFrame:
 
 
 def dashboard(data: pd.DataFrame, report: dict | None = None) -> dict:
+    started = time.monotonic()
     model = fit_model(data)
+    logging.getLogger("forecastops.performance").info("model_fit_seconds=%.3f", time.monotonic() - started)
+    started = time.monotonic()
     forecast = recursive_forecast(model, data, 7)
     baseline = seasonal_naive_forecast(data, 7)
+    logging.getLogger("forecastops.performance").info("forecast_seconds=%.3f", time.monotonic() - started)
+    started = time.monotonic()
     backtest = chronological_backtest(data)
+    logging.getLogger("forecastops.performance").info("backtest_seconds=%.3f", time.monotonic() - started)
     return {"data": [{"date": str(row.date.date()), "sales": round(float(row.sales), 2), "order_count": int(getattr(row, "order_count", 0) if pd.notna(getattr(row, "order_count", 0)) else 0)} for row in data.itertuples(index=False)], "forecast": [{"date": str(row.date.date()), "sales": round(float(row.forecast_sales), 2), "baseline": round(float(baseline.iloc[i].baseline_sales), 2)} for i, row in enumerate(forecast.itertuples(index=False))], "metrics": {"model_mae": round(backtest.model_mae, 2), "baseline_mae": round(backtest.baseline_mae, 2)}, "report": report or {}}
 
 
@@ -102,7 +116,7 @@ async def upload_csv(file: UploadFile = File(...)):
             raise HTTPException(413, "CSV files must be 5 MB or smaller.")
         frame = pd.read_csv(io.BytesIO(payload))
         data, cleaned = validate_sales_data(frame)
-        return dashboard(data, {"source": "Uploaded CSV", "duplicate_rows_aggregated": cleaned.duplicate_rows_aggregated, "missing_days_filled": cleaned.missing_days_filled})
+        return await run_in_threadpool(dashboard, data, {"source": "Uploaded CSV", "duplicate_rows_aggregated": cleaned.duplicate_rows_aggregated, "missing_days_filled": cleaned.missing_days_filled})
     except (SalesDataError, UnicodeDecodeError, pd.errors.ParserError, pd.errors.EmptyDataError) as error:
         raise HTTPException(422, str(error)) from error
 
@@ -252,7 +266,6 @@ def square_callback(request: Request, state: str = "", code: str = "", error: st
     return RedirectResponse("/?square=connected", status_code=303, headers={"Cache-Control": "no-store"})
 
 
-@app.get("/api/square/import")
 def square_import(request: Request, days: int = 180):
     if not square_configured():
         raise HTTPException(503, "Square OAuth configuration is incomplete.")
@@ -276,7 +289,8 @@ def square_import(request: Request, days: int = 180):
         token.update(refreshed.json())
         tokens.save_connection(connection_id, json.dumps(token))
     try:
-        client = SquareClient(token["access_token"], base_url=square_base_url())
+        check = getattr(_import_context, "check", lambda: None)
+        client = SquareClient(token["access_token"], base_url=square_base_url(), check=check)
         locations = [loc for loc in client.locations() if loc.get("status", "ACTIVE") == "ACTIVE"]
         if not locations:
             raise HTTPException(422, "Your Square account has no active locations.")
@@ -285,19 +299,28 @@ def square_import(request: Request, days: int = 180):
             raise HTTPException(422, "Locations use different currencies; combining them is not supported.")
         end = datetime.now(timezone.utc)
         start = end - timedelta(days=max(28, min(days, 365)))
-        daily_frames = []
+        totals = defaultdict(lambda: [0.0, 0])
         all_complete = True
         for location in locations:
-            orders, complete = client.completed_orders(location["id"], start.isoformat(), end.isoformat(), max_pages=50)
+            started = time.monotonic()
+            complete = False
+            for orders, complete in client.completed_order_pages(location["id"], start.isoformat(), end.isoformat(), max_pages=50):
+                check()
+                if orders:
+                    frame = normalize_orders(orders, location.get("timezone") or "UTC")
+                    for row in frame.itertuples(index=False):
+                        totals[row.date][0] += row.sales
+                        totals[row.date][1] += row.order_count
+                progress = getattr(_import_context, "progress", None)
+                if progress:
+                    progress()
+            logging.getLogger("forecastops.performance").info("square_location_seconds=%.3f", time.monotonic() - started)
             all_complete = all_complete and complete
-            if orders:
-                daily_frames.append(normalize_orders(orders, location.get("timezone") or "UTC"))
         if not all_complete:
             raise HTTPException(422, "Too many Square orders for one import. Try a shorter date range.")
-        if not daily_frames:
+        if not totals:
             raise HTTPException(422, "Square returned no completed orders for your account during this period.")
-        combined = pd.concat(daily_frames, ignore_index=True)
-        combined = combined.groupby("date", as_index=False).agg({"sales": "sum", "order_count": "sum"})
+        combined = pd.DataFrame([{"date": date, "sales": value[0], "order_count": value[1]} for date, value in totals.items()])
         combined = combined.set_index("date").reindex(
             pd.date_range(combined.date.min(), combined.date.max()), fill_value=0
         ).rename_axis("date").reset_index()
@@ -311,6 +334,95 @@ def square_import(request: Request, days: int = 180):
         return result
     except SquareError as error:
         raise HTTPException(502, str(error)) from error
+
+
+def _run_import(job_id: str, request: Request, days: int):
+    started = time.monotonic()
+    with _import_lock:
+        job = _import_jobs.get(job_id)
+        if not job or job["status"] == "cancelled":
+            return
+        job["status"] = "running"
+    try:
+        def check():
+            if time.monotonic() - started > IMPORT_MAX_SECONDS:
+                raise SquareError("Import timed out. Try a shorter date range.")
+            if job["status"] == "cancel_requested":
+                raise SquareError("Import cancelled.")
+            if not tokens.get_connection(job["owner"]):
+                raise SquareError("Your Square session expired. Connect again.")
+        def progress():
+            with _import_lock:
+                job["pages"] = job.get("pages", 0) + 1
+        _import_context.check, _import_context.progress = check, progress
+        result = square_import(request, days)
+        with _import_lock:
+            if job["status"] != "cancel_requested":
+                job.update(status="completed", result=result)
+    except Exception as error:
+        message = error.detail if isinstance(error, HTTPException) else "Import failed. Please try again."
+        with _import_lock:
+            if job["status"] != "cancel_requested":
+                job.update(status="failed", error=message)
+    finally:
+        _import_context.__dict__.clear()
+        with _import_lock:
+            if job["status"] == "cancel_requested":
+                job["status"] = "cancelled"
+        import logging
+        logging.getLogger("forecastops.import").info("Square import completed in %.3fs", time.monotonic() - started)
+
+
+@app.post("/api/square/import/jobs", status_code=202)
+def start_square_import(request: Request, days: int = 180):
+    connection = request.session.get("square_connection_id")
+    if not connection or not tokens.get_connection(connection):
+        raise HTTPException(401, "Your Square session expired. Connect again.")
+    now = time.monotonic()
+    with _import_lock:
+        for key in list(_import_jobs):
+            if now - _import_jobs[key]["created"] > 1800 and _import_jobs[key]["status"] not in ("running", "queued", "cancel_requested"):
+                del _import_jobs[key]
+        for key, job in _import_jobs.items():
+            if job["owner"] == connection and job["status"] in ("queued", "running"):
+                return {"job_id": key, "status": job["status"]}
+        if any(job["status"] in ("queued", "running", "cancel_requested") for job in _import_jobs.values()):
+            raise HTTPException(429, "Another import is in progress. Please retry shortly.")
+        job_id = secrets.token_urlsafe(24)
+        _import_jobs[job_id] = {"owner": connection, "status": "queued", "created": now}
+        _import_executor.submit(_run_import, job_id, request, days)
+    return {"job_id": job_id, "status": "queued"}
+
+
+def _owned_job(request: Request, job_id: str):
+    connection = request.session.get("square_connection_id")
+    if not connection or not tokens.get_connection(connection):
+        raise HTTPException(401, "Your Square session expired. Connect again.")
+    job = _import_jobs.get(job_id)
+    if not job or not secrets.compare_digest(job["owner"], connection):
+        raise HTTPException(404, "Import not found or server restarted. Please start again.")
+    if time.monotonic() - job["created"] > 1800 and job["status"] not in ("running", "queued", "cancel_requested"):
+        del _import_jobs[job_id]
+        raise HTTPException(404, "Import expired. Please start again.")
+    return job
+
+
+@app.get("/api/square/import/jobs/{job_id}")
+def get_square_import(request: Request, job_id: str):
+    with _import_lock:
+        job = _owned_job(request, job_id)
+        return {key: job[key] for key in ("status", "result", "error", "pages") if key in job}
+
+
+@app.delete("/api/square/import/jobs/{job_id}")
+def cancel_square_import(request: Request, job_id: str):
+    origin = request.headers.get("origin")
+    if origin not in {os.getenv("PUBLIC_ORIGIN", "https://forecastops.jeshwanthanthony.com").rstrip("/"), "http://localhost:5173", "http://localhost:8001"}:
+        raise HTTPException(403, "Invalid request origin.")
+    with _import_lock:
+        job = _owned_job(request, job_id)
+        job.update(status="cancel_requested" if job["status"] == "running" else "cancelled", result=None)
+    return {"status": "cancelled"}
 
 
 @app.post("/api/square/disconnect")
@@ -361,6 +473,8 @@ if STATIC.exists():
 
 @app.get("/{path:path}")
 def spa(path: str):
+    if path.startswith("api/"):
+        raise HTTPException(404, "API endpoint not found.")
     target = (STATIC / path).resolve()
     if path and target.is_relative_to(STATIC.resolve()) and target.is_file():
         return FileResponse(target)

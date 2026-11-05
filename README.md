@@ -9,7 +9,7 @@ A containerized sales-forecasting portfolio project with a public AWS EC2 deploy
 
 ForecastOps AI explores daily sales history, a seven-day forecast, and model accuracy. Try the synthetic demo or upload a CSV with `date`, `sales`, and optional `order_count`. At least 28 distinct dates are required.
 
-React and Vite provide the interface. FastAPI serves the built frontend and calls the existing Python forecasting and analyst modules. The random forest is compared with a seasonal-naive baseline using a chronological holdout.
+React and Vite provide the interface. FastAPI serves the built frontend and calls the Python forecasting and analyst modules. A seasonal-naive forecast is used for short histories; longer histories use regularized Ridge regression. Both are compared with a seasonal-naive baseline using a chronological holdout.
 
 ## Local setup
 
