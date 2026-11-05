@@ -1,25 +1,17 @@
 # ForecastOps AI
 
-**AI sales forecasting | Python · FastAPI · React · Docker · Kubernetes (kind) · AWS EC2 · ECR · S3 · GitHub Actions**
+ForecastOps takes daily sales data and estimates sales for the next seven days. Upload a CSV or use the sample data to see the forecast, sales history, and a comparison with a simple repeat-last-week baseline.
 
-**[Live HTTPS demo](https://forecastops.jeshwanthanthony.com)** · **[Deployment evidence](docs/DEPLOYMENT_EVIDENCE.md)** · **[Kubernetes manifests and instructions](k8s/README.md)**
+[Live site](https://forecastops.jeshwanthanthony.com) · [Python API](api.py) · [Forecasting](forecasting.py) · [React frontend](frontend/src/main.jsx) · [AWS setup](AWS.md) · [Kubernetes manifests](k8s/deployment.yaml) · [Tests](.github/workflows/tests.yml)
 
-A containerized sales-forecasting portfolio project with a public AWS EC2 deployment and a separate, reproducible local Kubernetes kind deployment. The public EC2 server runs Docker, **not EKS or K3s**. Square Production OAuth is under development separately; the current main-branch Square integration is for Sandbox testing.
+## Running locally
 
-
-ForecastOps AI explores daily sales history, a seven-day forecast, and model accuracy. Try the synthetic demo or upload a CSV with `date`, `sales`, and optional `order_count`. At least 28 distinct dates are required.
-
-React and Vite provide the interface. FastAPI serves the built frontend and calls the existing Python forecasting and analyst modules. The random forest is compared with a seasonal-naive baseline using a chronological holdout.
-
-## Local setup
-
-Install Python 3.12 and Node.js 22 or later. In PowerShell:
+You'll need Python 3.12 and Node.js 22 or newer. From PowerShell:
 
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-Copy-Item .env.example .env
 cd frontend
 npm install
 npm run build
@@ -28,60 +20,43 @@ python -m pytest
 python -m uvicorn api:app --reload --port 8001
 ```
 
-Open `http://localhost:8001`. The health endpoint is `/api/health`; API documentation is at `/api/docs`.
+Open http://localhost:8001. For frontend development, run `npm run dev` from `frontend` in another terminal. Vite proxies API requests to port 8001.
 
-For frontend development, run `npm run dev` in `frontend` in a second terminal while the backend is running. Vite prints its local URL and proxies `/api` requests to port 8001.
+The sample-data demo works without external credentials. Copy `.env.example` to `.env` if you want to configure an optional integration. Keep that file out of Git.
 
-## Configuration
+## Input data
 
-The backend loads `.env` automatically. Leave `OPENAI_API_KEY` blank to use the deterministic demo response; set it to enable the existing OpenAI analyst. Never put secrets in `VITE_` variables: Vite embeds them in browser code. No frontend environment variables are required for local use.
+The CSV importer in this branch expects `date` and numeric `sales` columns, with optional `order_count`. It needs at least 28 distinct daily observations, combines duplicate dates, and reports cleaning details.
 
-Square is sandbox-only and experimental. Set `SQUARE_SANDBOX_APP_ID`, `SQUARE_SANDBOX_APPLICATION_SECRET`, and the exact registered `SQUARE_REDIRECT_URI`; leave `SQUARE_ENVIRONMENT=sandbox`. The optional `SQUARE_SANDBOX_ACCESS_TOKEN` is a full-access personal sandbox test token, not an OAuth seller token; it is not used for seller imports. Set a long random `SESSION_SECRET` and a stable `ENCRYPTION_KEY` (URL-safe base64 encoding of 32 random bytes) to retain encrypted tokens across restarts. Generate a key with:
+The [forecasting code](forecasting.py) uses a random forest with recent sales lags and calendar features. It predicts seven days ahead and compares its error against a seasonal-naive forecast that repeats sales from the previous week. Evaluation uses a chronological holdout rather than shuffled rows.
 
-```powershell
-python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
-```
+Both the predictions and the reported mean absolute error (MAE) are estimates, not guarantees.
 
-`SQUARE_CLIENT_ID`, `SQUARE_CLIENT_SECRET`, `SQUARE_SANDBOX_APP_SECRET`, and `TOKEN_ENCRYPTION_KEY` remain supported as alternatives. Without persistent keys, sessions and stored sandbox tokens will not survive a restart. Set `COOKIE_SECURE=true` behind HTTPS. The OAuth flow and token refresh have not been verified against a live sandbox; refund handling remains incomplete. Do not use real seller data. `AWS_REGION` and `S3_BUCKET_NAME` are placeholders; S3 is not implemented.
+## Square
 
-## Docker
+The Square connector in the default branch is experimental and configured for Sandbox. It requests read-only merchant and order access. See [the API](api.py) and [.env example](.env.example) for its configuration.
+
+The [newer development branch](https://github.com/jeshwanthanthony/forecastops-ai/tree/feature/square-oauth-codex) contains the Production OAuth, flexible CSV importer, and updated dashboard currently being tested and deployed separately. The code on `master` may therefore differ from the live website until that branch is merged.
+
+## Docker and deployment
+
+Build and run a local container:
 
 ```powershell
 docker build -t forecastops-ai:local .
-docker run --rm -p 8000:8000 --env-file .env forecastops-ai:local
+docker run --rm -p 8000:8000 forecastops-ai:local
 ```
 
-The multistage build compiles the frontend and serves it from the FastAPI container. Omit `--env-file .env` if no optional integrations are configured.
+The public website runs on AWS EC2, with Nginx handling HTTPS in front of a Docker container. Kubernetes is a separate local [kind](k8s/README.md) exercise; the public site does not run on EKS.
 
-## Local Kubernetes
+An image was pushed to private Amazon ECR, and private S3 access was checked using an EC2 IAM role. S3 is not used to store application forecasts. The commands and evidence are in [AWS.md](AWS.md) and [deployment notes](docs/DEPLOYMENT_EVIDENCE.md).
+
+## Tests
 
 ```powershell
-kind load docker-image forecastops-ai:local --name forecastops
-kubectl apply -f k8s/deployment.yaml
-kubectl apply -f k8s/service.yaml
-kubectl rollout status deployment/forecastops-ai
-kubectl get pods -l app=forecastops-ai
-kubectl port-forward service/forecastops-ai 8000:8000
+python -m pytest
+cd frontend
+npm run build
 ```
 
-The deployment uses health probes. Demo scaling can be checked with `kubectl scale deployment/forecastops-ai --replicas=3`, then returned to one with `kubectl scale deployment/forecastops-ai --replicas=1`. Square token storage is local to each process and is not suitable for multiple replicas. See [Kubernetes reproduction steps](k8s/README.md) and [AWS.md](AWS.md). The Docker image was pushed to private AWS ECR as `v1`, and a private S3 test upload succeeded; S3 report storage is **not yet integrated into the application**.
-
-## Real infrastructure evidence
-
-| Capability | Verified project work |
-| --- | --- |
-| **AWS EC2, Docker, Nginx, HTTPS** | Public app is deployed to the EC2 Docker server behind a custom-domain TLS reverse proxy. |
-| **AWS IAM** | EC2 uses an assumed IAM role instead of embedded AWS access keys. |
-| **Amazon ECR** | Published `forecastops-ai:v1` container to private ECR in `us-east-2`. |
-| **Amazon S3** | Uploaded a private test artifact under the IAM-restricted `reports/` prefix. The application does not yet write forecast reports to S3. |
-| **Kubernetes** | `k8s/deployment.yaml` and `k8s/service.yaml` support a local kind deployment; a GitHub Actions smoke test builds the image and checks its health inside kind. |
-
-See [deployment evidence, exact resource names, and verification commands](docs/DEPLOYMENT_EVIDENCE.md). Check the GitHub [Actions](../../actions) page for **actual** CI results; a workflow file alone is not proof of a passed run.
-
-### Resume-ready project line
-
-**ForecastOps AI | Python, FastAPI, React, Docker, Kubernetes (kind), AWS EC2, ECR, S3, GitHub Actions**
-
-> Deployed a containerized AI sales-forecasting application to AWS EC2 with HTTPS, pushed versioned images to Amazon ECR, verified private S3 access with IAM, and configured repeatable Kubernetes kind deployments and CI smoke tests.
-
-
+See [GitHub Actions](https://github.com/jeshwanthanthony/forecastops-ai/actions) for CI results and the [Kubernetes smoke-test workflow](.github/workflows/kubernetes-smoke.yml) for the kind deployment check.
