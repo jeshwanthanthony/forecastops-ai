@@ -1,4 +1,4 @@
-Kubernetes: https://github.com/jeshwanthanthony/forecastops-ai/tree/master/k8s | AWS: https://github.com/jeshwanthanthony/forecastops-ai/blob/master/AWS.md
+Kubernetes: [![Kubernetes smoke test](https://github.com/jeshwanthanthony/forecastops-ai/actions/workflows/kubernetes-smoke.yml/badge.svg?branch=master)](https://github.com/jeshwanthanthony/forecastops-ai/actions/runs/41956496746) | AWS: https://github.com/jeshwanthanthony/forecastops-ai/blob/master/AWS.md
 
 # Forecast
 
