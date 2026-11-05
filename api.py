@@ -149,6 +149,13 @@ def config_status():
     return {"missing": missing, "square_environment_supported": square_environment() in ("sandbox", "production")}
 
 
+@app.get("/api/square/session")
+def square_session(request: Request):
+    connection_id = request.session.get("square_connection_id")
+    active = bool(connection_id and tokens.get_connection(connection_id))
+    return {"connected": active, "mode": square_environment()}
+
+
 @app.get("/api/square/connect")
 def square_connect(request: Request):
     if not square_configured():
@@ -301,6 +308,14 @@ def square_disconnect(request: Request):
     revoked = bool(response is not None and response.is_success and response.json().get("success"))
     return {"disconnected": True, "square_revoked": revoked,
             "message": None if revoked else "Local session cleared. Revoke ForecastOps in your Square Dashboard to ensure access is removed."}
+
+@app.middleware("http")
+async def no_cache_private_responses(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/square/") or request.url.path == "/api/ask":
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
 
 if STATIC.exists():
     app.mount("/assets", StaticFiles(directory=STATIC / "assets"), name="assets")
