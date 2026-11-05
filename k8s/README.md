@@ -1,12 +1,14 @@
-# ForecastOps AI on Kubernetes (kind)
+# Kubernetes (kind)
 
-The live website runs Docker on AWS EC2. These manifests deploy the **same application** to a disposable local kind Kubernetes cluster or a kind cluster created by GitHub Actions. They are **not an AWS EKS deployment**.
+This is how I run Forecast in a local Kubernetes cluster using [kind](https://kind.sigs.k8s.io/). The public website runs directly in Docker on AWS EC2, not on Kubernetes or EKS.
 
-## Run locally
+You'll need Docker, kind, and kubectl installed.
 
-Requires Docker, kind, kubectl, and this repository. From the repository root:
+## Start a cluster
 
-```bash
+From the repository root:
+
+\`\`\`bash
 docker build -t forecastops-ai:local .
 kind create cluster --name forecastops
 kind load docker-image forecastops-ai:local --name forecastops
@@ -14,35 +16,40 @@ kubectl apply -f k8s/deployment.yaml
 kubectl apply -f k8s/service.yaml
 kubectl rollout status deployment/forecastops-ai --timeout=180s
 kubectl get pods -l app=forecastops-ai
-kubectl get service forecastops-ai
 kubectl port-forward service/forecastops-ai 8000:8000
-```
+\`\`\`
 
-From a second terminal:
+In another terminal:
 
-```bash
-curl --fail http://127.0.0.1:8000/api/health
-```
+\`\`\`bash
+curl -fsS http://127.0.0.1:8000/api/health
+\`\`\`
 
-Expected health payload: `{"status":"ok"}`. To test a rolling update or resilience, inspect `kubectl describe deployment/forecastops-ai` and `kubectl logs deployment/forecastops-ai`.
+You should get \`{"status":"ok"}\`.
 
-Clean up the local test:
+To look at what Kubernetes started:
 
-```bash
+\`\`\`bash
+kubectl describe deployment/forecastops-ai
+kubectl logs deployment/forecastops-ai
+\`\`\`
+
+When you're finished:
+
+\`\`\`bash
 kind delete cluster --name forecastops
-```
+\`\`\`
 
-## GitHub Actions proof
+## GitHub Actions
 
-See [Kubernetes smoke workflow](../.github/workflows/kubernetes-smoke.yml) and the repository's **Actions** tab. It builds the image, creates a kind cluster, loads the image, deploys the manifests, waits for readiness, and checks `/api/health`.
+The [Kubernetes smoke-test workflow](../.github/workflows/kubernetes-smoke.yml) builds the Docker image, creates a temporary kind cluster, applies these same manifests, and checks the health endpoint.
 
-A successful run is stronger evidence than YAML files alone. A workflow file by itself does not establish that the test passed.
+[Here's a successful run from November 5, 2026](https://github.com/jeshwanthanthony/forecastops-ai/actions/runs/41956496746). It tested commit \`797604fd\`, not every subsequent code change.
 
-## Boundaries
+## A couple of limits
 
-- One replica by default. Readiness/liveness probes hit `/api/health`.
-- This local demo uses the synthetic forecast with no Square/OpenAI production credentials.
-- Square OAuth tokens currently use local SQLite storage; do not scale to multiple replicas or connect production sellers in ephemeral kind without a durable external token/session design.
-- The live AWS EC2 `t3.micro` is too small for a reliable always-on Kubernetes server alongside this application. Do not install kind/K3s there solely for a resume keyword.
+The manifest starts one replica and uses health probes. For this local test I use synthetic data, with no production Square credentials.
 
-For actual AWS setup and proof, see [deployment evidence](../docs/DEPLOYMENT_EVIDENCE.md).
+Square connections currently rely on per-process state and local SQLite storage. This kind setup isn't ready to run multiple replicas with real seller sessions. The \`t3.micro\` EC2 machine is also too small to host a Kubernetes control plane alongside the live app.
+
+AWS setup details are in [AWS.md](../AWS.md).
