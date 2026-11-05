@@ -4,6 +4,8 @@ ForecastOps turns daily sales data into a seven-day forecast and compares it wit
 
 [Live application](https://forecastops.jeshwanthanthony.com) · [Backend](api.py) · [Forecasting](forecasting.py) · [Square](square.py) · [AWS](AWS.md) · [Deployment evidence](docs/DEPLOYMENT_EVIDENCE.md) · [Kubernetes manifest](k8s/deployment.yaml) · [Kubernetes smoke workflow](.github/workflows/kubernetes-smoke.yml) · [Python tests](.github/workflows/tests.yml)
 
+The [React workspace](frontend/src/ResultsDashboard.jsx) shows sales history, a seven-day outlook, weekday averages, and model error. Drag a CSV into the upload card to preview and map its columns, or use the synthetic scenarios to explore different demand patterns. Chart points expose their dates and values on hover or keyboard focus. The pipeline panel describes the data and evaluation actually used.
+
 [![Python tests](https://github.com/jeshwanthanthony/forecastops-ai/actions/workflows/tests.yml/badge.svg?branch=feature%2Fsquare-oauth-codex)](https://github.com/jeshwanthanthony/forecastops-ai/actions/workflows/tests.yml) [![Kubernetes smoke](https://github.com/jeshwanthanthony/forecastops-ai/actions/workflows/kubernetes-smoke.yml/badge.svg?branch=feature%2Fsquare-oauth-codex)](https://github.com/jeshwanthanthony/forecastops-ai/actions/workflows/kubernetes-smoke.yml)
 
 ## How it works

@@ -56,7 +56,7 @@ async def limit_public_requests(request: Request, call_next):
         return await call_next(request)
     now = time.monotonic()
     path = request.url.path
-    group = "expensive" if path in {"/api/ask", "/api/upload", "/api/demo", "/api/square/import/jobs"} and request.method != "GET" else "other"
+    group = "expensive" if path in {"/api/ask", "/api/upload", "/api/demo", "/api/forecast", "/api/square/import/jobs"} and request.method != "GET" else "other"
     limit = 15 if group == "expensive" else 90
     key = ((request.client.host if request.client else "unknown"), group)
     with _rate_lock:
@@ -92,22 +92,26 @@ def demo_data(days: int = 730, scenario: str = "normal") -> pd.DataFrame:
     return pd.DataFrame({"date": dates, "sales": sales.round(2), "order_count": (sales / rng.normal(19, 1.2, days)).round().astype(int)})
 
 
-def dashboard(data: pd.DataFrame, report: dict | None = None) -> dict:
+def dashboard(data: pd.DataFrame, report: dict | None = None, horizon: int = 7) -> dict:
     report = dict(report or {})
     report["model"] = "seasonal naive" if len(data) < 60 else "Ridge regression"
-    horizon = min(28, max(7, len(data) // 4))
-    report["training_end"] = str(pd.Timestamp(data.date.iloc[-horizon - 1]).date())
-    report["evaluation_start"] = str(pd.Timestamp(data.date.iloc[-horizon]).date())
+    evaluation_days = min(28, max(7, len(data) // 4))
+    report["training_end"] = str(pd.Timestamp(data.date.iloc[-evaluation_days - 1]).date())
+    report["evaluation_start"] = str(pd.Timestamp(data.date.iloc[-evaluation_days]).date())
     report["evaluation_end"] = str(pd.Timestamp(data.date.iloc[-1]).date())
     started = time.monotonic()
     model = fit_model(data)
+    report["fit_seconds"] = round(time.monotonic() - started, 4)
     logging.getLogger("forecastops.performance").info("model_fit_seconds=%.3f", time.monotonic() - started)
     started = time.monotonic()
-    forecast = recursive_forecast(model, data, 7)
-    baseline = seasonal_naive_forecast(data, 7)
+    forecast = recursive_forecast(model, data, horizon)
+    baseline = seasonal_naive_forecast(data, horizon)
+    report["forecast_seconds"] = round(time.monotonic() - started, 4)
+    report["forecast_days"] = horizon
     logging.getLogger("forecastops.performance").info("forecast_seconds=%.3f", time.monotonic() - started)
     started = time.monotonic()
     backtest = chronological_backtest(data)
+    report["backtest_seconds"] = round(time.monotonic() - started, 4)
     logging.getLogger("forecastops.performance").info("backtest_seconds=%.3f", time.monotonic() - started)
     return {"data": [{"date": str(row.date.date()), "sales": round(float(row.sales), 2), "order_count": int(getattr(row, "order_count", 0) if pd.notna(getattr(row, "order_count", 0)) else 0)} for row in data.itertuples(index=False)], "forecast": [{"date": str(row.date.date()), "sales": round(float(row.forecast_sales), 2), "baseline": round(float(baseline.iloc[i].baseline_sales), 2)} for i, row in enumerate(forecast.itertuples(index=False))], "metrics": {"model_mae": round(backtest.model_mae, 2), "baseline_mae": round(backtest.baseline_mae, 2)}, "report": report or {}}
 
@@ -124,6 +128,20 @@ def get_demo(scenario: str = "normal"):
     if scenario not in {"normal", "weekend", "growth", "seasonal", "change"}:
         raise HTTPException(400, "Unknown demo scenario.")
     return cached_demo(scenario)
+
+@app.post("/api/forecast")
+def generate_forecast(body: dict):
+    horizon = body.get("days", 7)
+    if type(horizon) is not int or horizon not in (1, 7, 14):
+        raise HTTPException(422, "Choose a 1, 7, or 14-day forecast.")
+    rows = body.get("data", [])
+    if not isinstance(rows, list) or len(rows) > 3653:
+        raise HTTPException(422, "Dataset exceeds forecast limits.")
+    try:
+        data, _ = validate_sales_data(pd.DataFrame(rows))
+        return dashboard(data, {"source": "Loaded dataset"}, horizon)
+    except (SalesDataError, ValueError) as error:
+        raise HTTPException(422, str(error)) from error
 
 @app.get("/api/sample.csv")
 def sample_csv(): return FileResponse(ROOT / "data" / "sample_sales.csv", media_type="text/csv", filename="forecastops-sample.csv")

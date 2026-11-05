@@ -20,6 +20,21 @@ def test_demo_scenarios_are_reproducible_and_distinct():
     assert not demo_data(90, 'normal').equals(demo_data(90, 'weekend'))
 
 
+def test_selectable_forecast_horizons_and_real_timings():
+    import api
+    api._rate_events.clear()
+    rows = client.get('/api/demo').json()['data'][-90:]
+    for days in (1, 7, 14):
+        response = client.post('/api/forecast', json={'data': rows, 'days': days})
+        assert response.status_code == 200
+        result = response.json()
+        assert len(result['forecast']) == days
+        assert result['report']['fit_seconds'] >= 0
+        assert result['report']['forecast_days'] == days
+    assert client.post('/api/forecast', json={'data': rows, 'days': 999}).status_code == 422
+    api._rate_events.clear()
+
+
 def test_each_demo_scenario_returns_forecast():
     for scenario in ('normal', 'weekend', 'growth', 'seasonal', 'change'):
         response = client.get('/api/demo', params={'scenario': scenario})
