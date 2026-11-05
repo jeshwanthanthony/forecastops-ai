@@ -1,10 +1,10 @@
 Kubernetes: https://github.com/jeshwanthanthony/forecastops-ai/tree/master/k8s | AWS: https://github.com/jeshwanthanthony/forecastops-ai/blob/master/AWS.md
 
-# ForecastOps AI
+# Forecast
 
 Live: https://forecastops.jeshwanthanthony.com
 
-I built ForecastOps to see what next week's sales might look like using past sales. You can upload a CSV or try it with sample data. It shows a seven-day forecast, daily sales patterns, and how the model did compared with a simple baseline.
+Forecast is a full-stack, Docker-containerized sales forecasting application built with Python, FastAPI, Pandas, scikit-learn, React, and Vite, combining CSV data ingestion, Square Production OAuth, time-series feature engineering, chronological backtesting, seasonal-naive baseline evaluation, and interactive visualizations, deployed to AWS EC2 behind Nginx and HTTPS, with Amazon ECR image publishing, IAM-controlled S3 access checks, Kubernetes kind deployment manifests, and GitHub Actions continuous integration.
 
 The backend is Python and FastAPI, with Pandas for the sales data. React handles the dashboard. The code is in [api.py](api.py), [forecasting.py](forecasting.py), and [frontend](frontend/).
 
