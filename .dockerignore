@@ -8,3 +8,4 @@ __pycache__
 *.pyc
 forecastops.db
 frontend/node_modules
+.pr1-review

@@ -21,6 +21,7 @@ class TokenStore:
         with self._connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS square_connections (merchant_id TEXT PRIMARY KEY, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS oauth_states (state_hash TEXT PRIMARY KEY, expires_at REAL NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS visitor_connections (connection_id TEXT PRIMARY KEY, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL, expires_at REAL NOT NULL)")
 
     def _connect(self):
         return sqlite3.connect(self.path)
@@ -45,3 +46,31 @@ class TokenStore:
         with self._connect() as db:
             result = db.execute("DELETE FROM oauth_states WHERE state_hash = ? AND expires_at >= ?", (state_hash, time.time()))
             return result.rowcount == 1
+
+    def save_connection(self, connection_id: str, token: str, ttl_seconds: int = 21600) -> None:
+        """Keep each visitor's OAuth token separate, encrypted and time-limited."""
+        nonce = os.urandom(12)
+        ciphertext = AESGCM(self.key).encrypt(nonce, token.encode(), connection_id.encode())
+        with self._connect() as db:
+            db.execute("DELETE FROM visitor_connections WHERE expires_at < ?", (time.time(),))
+            db.execute(
+                "INSERT OR REPLACE INTO visitor_connections VALUES (?, ?, ?, ?)",
+                (connection_id, nonce, ciphertext, time.time() + ttl_seconds),
+            )
+
+    def get_connection(self, connection_id: str) -> str | None:
+        if not connection_id:
+            return None
+        with self._connect() as db:
+            record = db.execute(
+                "SELECT nonce, ciphertext, expires_at FROM visitor_connections WHERE connection_id = ?",
+                (connection_id,),
+            ).fetchone()
+            if record and record[2] <= time.time():
+                db.execute("DELETE FROM visitor_connections WHERE connection_id = ?", (connection_id,))
+                return None
+        return AESGCM(self.key).decrypt(record[0], record[1], connection_id.encode()).decode() if record else None
+
+    def delete_connection(self, connection_id: str) -> None:
+        with self._connect() as db:
+            db.execute("DELETE FROM visitor_connections WHERE connection_id = ?", (connection_id,))

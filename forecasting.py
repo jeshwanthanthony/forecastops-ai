@@ -6,7 +6,9 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import Ridge
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error
 
 LAGS = (1, 7, 14)
@@ -41,19 +43,24 @@ def _training_frame(data: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     return pd.DataFrame(rows), pd.Series(targets)
 
 
-def fit_model(train: pd.DataFrame) -> RandomForestRegressor:
-    """Fit a deterministic, compact regression model on historical rows only."""
+class WeeklyBaseline:
+    def predict(self, features: pd.DataFrame):
+        return features["lag_7"].to_numpy()
+
+
+def fit_model(train: pd.DataFrame):
+    """Use last-week sales for short histories and regularized regression otherwise."""
     if len(train) < max(LAGS) + 7:
         raise ValueError("At least 21 daily observations are required for forecasting.")
+    if len(train) < 60:
+        return WeeklyBaseline()
     features, target = _training_frame(train)
-    model = RandomForestRegressor(
-        n_estimators=150, min_samples_leaf=2, random_state=42, n_jobs=-1
-    )
+    model = make_pipeline(StandardScaler(), Ridge(alpha=10))
     model.fit(features, target)
     return model
 
 
-def recursive_forecast(model: RandomForestRegressor, history: pd.DataFrame, days: int) -> pd.DataFrame:
+def recursive_forecast(model, history: pd.DataFrame, days: int) -> pd.DataFrame:
     """Forecast forward without reading any future actual sales values."""
     if days < 1:
         raise ValueError("days must be positive")

@@ -1,0 +1,13 @@
+# EC2 deployment review (not deployed)
+
+Do not expose Production OAuth until the outstanding live and security checks pass. The changes have not been applied to the live server.
+
+Square Developer Console production credentials: application ID and application secret. Register `https://forecastops.jeshwanthanthony.com/api/square/callback` exactly. Configure `SQUARE_ENVIRONMENT=production`, `SQUARE_PRODUCTION_APP_ID`, `SQUARE_PRODUCTION_APPLICATION_SECRET`, `SQUARE_REDIRECT_URI`, `SESSION_SECRET`, `ENCRYPTION_KEY`, `COOKIE_SECURE=true`, and `PUBLIC_ORIGIN=https://forecastops.jeshwanthanthony.com` on the server. Do not use a personal access token. Keep OpenAI disabled on a public deployment until requests have usage limits.
+
+Before deployment, review the actual EC2 Nginx and Docker setup. The repository does not contain those server configurations. Preserve the existing TLS termination and route `/api/square/` to FastAPI. Suppress access logging of callback query strings in both Nginx and Uvicorn: the callback URL contains a one-time authorization code and state. One option is a specific Nginx callback location with `access_log off` and starting Uvicorn with `--no-access-log`; review error logs and intermediaries too. Disable or protect `/api/config/status`, API docs, and sensitive diagnostic endpoints from public exposure.
+
+The SQLite database contains encrypted visitor tokens. Set `FORECASTOPS_DB_PATH` to a path in a restricted persistent volume if connections must survive container restarts. If persisted, restrict access, back it up deliberately, and keep the encryption key outside the image and Git. Session expiration removes local access but does not revoke seller authorization at Square: resolve the lifecycle and explain it to visitors before public use. Square revocation can invalidate other sessions for the same seller. Sessions are temporary browser sessions, not accounts.
+
+The application request limit is in-memory and per process. Confirm trusted reverse-proxy IP configuration and add an independent Nginx limit before public traffic; otherwise every visitor might appear as the proxy or a client could spoof an address. The actual Nginx configuration is not available in this workspace.
+
+After mocked tests pass, verify sandbox authorization, two separate browser sessions, reconnect, disconnect, multiple locations, no-order sellers, refresh, error handling, TLS, cookie flags, logging, and actual Nginx routing. Only then request the necessary production seller participation and confirm production end-to-end behavior. No deployment command has been run.

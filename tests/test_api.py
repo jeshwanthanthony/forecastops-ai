@@ -13,6 +13,46 @@ def test_health_and_demo_work_without_external_credentials():
     assert len(demo.json()["forecast"]) == 7
 
 
+def test_demo_scenarios_are_reproducible_and_distinct():
+    from api import demo_data
+    for scenario in ('normal', 'weekend', 'growth', 'seasonal', 'change'):
+        assert demo_data(90, scenario).equals(demo_data(90, scenario))
+    assert not demo_data(90, 'normal').equals(demo_data(90, 'weekend'))
+
+
+def test_selectable_forecast_horizons_and_real_timings():
+    import api
+    api._rate_events.clear()
+    rows = client.get('/api/demo').json()['data'][-90:]
+    for days in (1, 7, 14):
+        response = client.post('/api/forecast', json={'data': rows, 'days': days})
+        assert response.status_code == 200
+        result = response.json()
+        assert len(result['forecast']) == days
+        assert result['report']['fit_seconds'] >= 0
+        assert result['report']['forecast_days'] == days
+    assert client.post('/api/forecast', json={'data': rows, 'days': 999}).status_code == 422
+    api._rate_events.clear()
+
+
+def test_each_demo_scenario_returns_forecast():
+    for scenario in ('normal', 'weekend', 'growth', 'seasonal', 'change'):
+        response = client.get('/api/demo', params={'scenario': scenario})
+        assert response.status_code == 200
+        assert len(response.json()['forecast']) == 7
+
+
+def test_csv_preview_and_mapped_import():
+    rows = 'order_date;revenue\n' + '\n'.join(f'2026-01-{day:02d};1200.50' for day in range(1,29))
+    content = rows.encode()
+    preview = client.post('/api/csv/preview', files={'file': ('sales.csv', content, 'text/csv')})
+    assert preview.status_code == 200
+    assert preview.json()['candidates']['sales'] == ['revenue']
+    imported = client.post('/api/csv/import', files={'file': ('sales.csv', content, 'text/csv')}, data={'date_column': 'order_date', 'sales_column': 'revenue'})
+    assert imported.status_code == 200
+    assert imported.json()['report']['input_rows'] == 28
+
+
 def test_upload_rejects_bad_csv_and_accepts_order_count():
     bad = client.post("/api/upload", files={"file": ("bad.csv", b"date,sales\nnot-date,5\n", "text/csv")})
     assert bad.status_code == 422
