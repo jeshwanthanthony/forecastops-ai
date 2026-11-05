@@ -36,7 +36,7 @@ Both the predictions and the reported mean absolute error (MAE) are estimates, n
 
 The Square connector in the default branch is experimental and configured for Sandbox. It requests read-only merchant and order access. See [the API](api.py) and [.env example](.env.example) for its configuration.
 
-The [newer development branch](https://github.com/jeshwanthanthony/forecastops-ai/tree/feature/square-oauth-codex) contains the Production OAuth, flexible CSV importer, and updated dashboard currently being tested and deployed separately. The code on `master` may therefore differ from the live website until that branch is merged.
+The [newer development branch](https://github.com/jeshwanthanthony/forecastops-ai/tree/feature/square-oauth-codex) contains the Production OAuth, flexible CSV importer, and updated dashboard used by the live deployment. The code on `master` may therefore differ from the live website until that branch is merged.
 
 ## Docker and deployment
 
